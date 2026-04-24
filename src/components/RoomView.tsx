@@ -83,7 +83,7 @@ export function RoomView() {
                })}
              </div>
 
-             {room.players[0] && room.players[0].id === useGameStore.getState().socket?.id ? (
+             {room.players?.[0] && room.players[0].id === useGameStore.getState().socket?.id ? (
                <div className="flex flex-col gap-2">
                  {room.players.length < 4 && (
                    <button 
