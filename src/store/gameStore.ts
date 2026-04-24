@@ -552,7 +552,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     const nextIsBot = (!isOffline && room?.players.find((p: any) => p.color === nextTurn && p.isBot)) || (isOffline && nextTurn !== myColor);
-    const nextCanManage = isOffline || (!isOffline && room?.players[0].id === socket?.id && nextIsBot);
+    const nextCanManage = isOffline;
     
     if (nextCanManage && nextIsBot) {
        setTimeout(() => get().playBotTurn(nextTurn), 1000);

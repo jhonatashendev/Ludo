@@ -106,6 +106,7 @@ export function RoomView() {
                  Aguardando o host iniciar...
                </div>
              )}
+             <button onClick={leaveRoom} className="mt-4 p-3 w-full rounded-2xl bg-white/5 hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 text-white/80 hover:text-red-400 font-bold text-sm uppercase tracking-widest transition flex items-center justify-center gap-2"><LogOut size={16} /> Voltar / Sair da Sala</button>
           </motion.div>
         </div>
       )}
