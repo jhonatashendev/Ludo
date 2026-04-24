@@ -1,0 +1,8 @@
+{
+  "name": "Ludo 3D NextGen",
+  "description": "A next-generation 3D Ludo game with real-time multiplayer, voice chat, and coin betting.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
