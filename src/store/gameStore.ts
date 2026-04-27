@@ -18,11 +18,23 @@ export type Message = {
   timestamp: number;
 };
 
+export type GameMode = 'classic' | 'powers';
+
 export type Room = {
   id: string;
   players: any[];
   gameState: 'waiting' | 'playing' | 'finished';
   pot: number;
+  betAmount?: number;
+  gameMode?: GameMode;
+  traps?: number[];
+  powerEffects?: Record<string, {
+     shield?: number;
+     turbo?: number;
+     curse?: number;
+     diceBlock?: number;
+     doubleRoll?: number;
+  }>;
 };
 
 interface GameState {
@@ -39,6 +51,7 @@ interface GameState {
   pawns: Pawn[];
   turn: PlayerColor;
   diceValue: number | null;
+  diceChoices: [number, number] | null;
   isRolling: boolean;
   activeRoomId: string | null;
   betAmount: number;
@@ -49,7 +62,7 @@ interface GameState {
   setAuthReady: (ready: boolean) => void;
   connect: () => void;
   getRooms: () => Promise<any[]>;
-  createRoom: (data: { name?: string; password?: string; betAmount: number }) => Promise<any>;
+  createRoom: (data: { name?: string; password?: string; betAmount: number; gameMode?: 'classic' | 'powers' }) => Promise<any>;
   joinRoom: (roomId: string, password?: string) => Promise<any>;
   addBotOnline: () => void;
   startGameOnline: () => void;
@@ -66,12 +79,15 @@ interface GameState {
   updateRoom: (room: Room) => void;
   setPlayer: (player: Player) => void;
   rollDice: () => void;
+  executeDiceResult: (result: number, isBot: boolean) => void;
+  selectDiceChoice: (choice: number) => void;
   movePawn: (pawnId: string) => void;
   applyMoveLocally: (pawnId: string, diceResult: number) => void;
   syncState: () => void;
   shouldManageTurn: () => boolean;
   nextTurn: () => void;
   playBotTurn: (color: PlayerColor) => void;
+  triggerPower: (color: PlayerColor) => void;
   setCredentials: (username: string, initialCoins?: number) => void;
   updateCoins: (coins: number) => void;
 }
@@ -90,6 +106,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   pawns: [],
   turn: 'RED',
   diceValue: null,
+  diceChoices: null,
   isRolling: false,
   activeRoomId: null,
   betAmount: 0,
@@ -193,6 +210,7 @@ export const useGameStore = create<GameState>((set, get) => ({
             view: 'room',
             pawns: initializePawns(activeColors),
             diceValue: null,
+            diceChoices: null,
             isRolling: false,
             betAmount: data.room.betAmount || 0,
             finishedPlayers: [],
@@ -423,8 +441,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     } else if (socket && room) {
       socket.emit('leave_room', room.id);
       let newActiveRoomId = get().activeRoomId;
-      if (room.gameState === 'playing' && player && room.players.find((p: any) => p.id === socket.id)) {
+      if (room.gameState === 'playing' && player && room.players.find((p: any) => p.id === socket.id && !p.isForfeited)) {
         newActiveRoomId = room.id;
+      }
+      if (room.gameState === 'finished' || room.gameState === 'waiting') {
+        newActiveRoomId = null;
       }
       set({ room: null, view: 'lobby', messages: [], isOffline: false, activeRoomId: newActiveRoomId });
     }
@@ -458,36 +479,71 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
-  rollDice: () => {
-    const { isRolling, diceValue, turn, myColor, isOffline, room, socket } = get();
-    if (isRolling || diceValue !== null || turn !== myColor) return;
-    
-    if (get().soundEnabled) {
-      import('../lib/sounds').then(({ playSound }) => playSound('roll'));
-    }
-
-    set({ isRolling: true });
-    
-    setTimeout(() => {
-      const result = Math.floor(Math.random() * 6) + 1;
-      set({ diceValue: result, isRolling: false });
+  executeDiceResult: (result: number, isBot: boolean) => {
+      const { isOffline, socket, room, turn } = get();
+      set({ diceValue: result, isRolling: false, diceChoices: null });
       
       if (!isOffline && socket && room) {
         socket.emit('roll_dice', { roomId: room.id, result });
       }
+
+      // Decrement/handle power effects before resolving moves
+      const effects = room?.powerEffects?.[turn];
+      let didTriggerPower = false;
+
+      if (room?.gameMode === 'powers' && result === 1) {
+         if (effects?.diceBlock && effects.diceBlock > 0) {
+            // "se esse jogador tirar 1 ele não ganha poder"
+         } else {
+            get().triggerPower(turn);
+            didTriggerPower = true;
+         }
+      }
+
+      // Consume roll-based effects
+      if (effects) {
+         let newEffects = { ...room!.powerEffects };
+         if (newEffects[turn].diceBlock && newEffects[turn].diceBlock! > 0) {
+             newEffects[turn].diceBlock! -= 1;
+         }
+         if (newEffects[turn].curse && newEffects[turn].curse! > 0) {
+             newEffects[turn].curse! -= 1;
+             // Curse forces result to 1 (or 1 move). But wait, do we override result? 
+             // "escolhe 1 jogador para anda sempre 1 casa por 1 rodadas" -> they already rolled, let's treat curse as overriding their roll to 1! 
+             // Wait, if it forces 1, they would trigger powers again? No, curse shouldn't chain powers usually... but maybe it does. Let's just override result.
+         }
+         if (newEffects[turn].turbo && newEffects[turn].turbo! > 0) {
+             newEffects[turn].turbo! -= 1;
+         }
+         if (newEffects[turn].shield && newEffects[turn].shield! > 0) {
+             newEffects[turn].shield! -= 1;
+         }
+         if (newEffects[turn].doubleRoll && newEffects[turn].doubleRoll! > 0) {
+             newEffects[turn].doubleRoll! -= 1;
+         }
+         
+         if (room && socket) socket.emit('sync_state', { roomId: room.id, powerEffects: newEffects });
+         set({ room: { ...room!, powerEffects: newEffects } });
+      }
+
+      let moveResult = result;
+      if (effects?.curse && effects.curse > 0) moveResult = 1;
+      if (effects?.turbo && effects.turbo > 0) moveResult = result * 2;
+      
+      set({ diceValue: moveResult });
       get().syncState();
 
       const { pawns } = get();
       const myPawns = pawns.filter(p => p.color === turn);
-      const validMoves = myPawns.filter(p => canPlay(p, result));
+      const validMoves = myPawns.filter(p => canPlay(p, moveResult));
       
       if (validMoves.length === 0) {
-        if (result === 6) {
+        if (moveResult === 6) {
           setTimeout(() => {
              set({ diceValue: null });
              if (get().shouldManageTurn()) {
-                 const isBot = (!isOffline && room?.players.find((p: any) => p.color === turn && p.isBot)) || (isOffline && turn !== get().myColor);
-                 if (isBot) get().playBotTurn(turn);
+                 const isBotTurn = (!isOffline && room?.players.find((p: any) => p.color === turn && p.isBot)) || (isOffline && turn !== get().myColor);
+                 if (isBotTurn) get().playBotTurn(turn);
              }
           }, 1000);
         } else {
@@ -499,8 +555,76 @@ export const useGameStore = create<GameState>((set, get) => ({
          if (get().shouldManageTurn()) {
              setTimeout(() => get().movePawn(validMoves[0].id), 500);
          }
+       } else if (isBot) {
+          // 1. Capture enemy
+          const captureMoves = validMoves.filter(p => {
+             let newPos = p.position === -1 ? 0 : p.position + moveResult;
+             if (newPos >= 0 && newPos <= 50) {
+                const clone = { ...p, position: newPos };
+                const myAbsPos = getAbsolutePosition(clone);
+                if (!ABSOLUTE_SAFE_SQUARES.includes(myAbsPos)) {
+                   return pawns.some(p2 => p2.color !== turn && p2.position >= 0 && p2.position <= 50 && getAbsolutePosition(p2) === myAbsPos);
+                }
+             }
+             return false;
+          });
+
+          // 2. Spawn a pawn out of the base (priority if 6)
+          const spawningMoves = validMoves.filter(p => p.position === -1);
+
+          // 3. Flee from danger or enter finish line
+          const finishLineMoves = validMoves.filter(p => p.position !== -1 && p.position + moveResult > 50);
+          const fleeingMoves = validMoves.filter(p => {
+             if (p.position === -1 || p.position > 50) return false;
+             const myAbs = getAbsolutePosition(p);
+             if (ABSOLUTE_SAFE_SQUARES.includes(myAbs)) return false;
+             return pawns.some(p2 => {
+                if (p2.color === turn || p2.position < 0 || p2.position > 50) return false;
+                const enemyAbs = getAbsolutePosition(p2);
+                const diff = (myAbs - enemyAbs + 52) % 52;
+                return diff > 0 && diff <= 6;
+             });
+          });
+
+          // 4. Move the most advanced piece
+          const mostAdvancedMoves = [...validMoves].sort((a, b) => b.position - a.position);
+
+          const pawnToMove = captureMoves[0] || spawningMoves[0] || finishLineMoves[0] || fleeingMoves[0] || mostAdvancedMoves[0];
+          setTimeout(() => get().movePawn(pawnToMove.id), 500);
        }
+  },
+
+  rollDice: () => {
+    const { isRolling, diceValue, turn, myColor, room } = get();
+    if (isRolling || diceValue !== null || turn !== myColor) return;
+    
+    if (get().soundEnabled) {
+      import('../lib/sounds').then(({ playSound }) => playSound('roll'));
+    }
+
+    set({ isRolling: true });
+    
+    setTimeout(() => {
+      let maxRoll = 6;
+      if (room?.gameMode === 'powers' && room?.powerEffects?.[turn]?.diceBlock && room.powerEffects[turn].diceBlock! > 0) {
+         maxRoll = 3;
+      }
+      const result = Math.floor(Math.random() * maxRoll) + 1;
+      
+      // If doubleRoll is active and room is powers
+      const doubleRollData = room?.powerEffects?.[turn]?.doubleRoll;
+      if (room && room.gameMode === 'powers' && doubleRollData && doubleRollData > 0) {
+         const result2 = Math.floor(Math.random() * maxRoll) + 1;
+         set({ diceChoices: [result, result2], isRolling: false });
+         return;
+      }
+      
+      get().executeDiceResult(result, false);
     }, 600);
+  },
+
+  selectDiceChoice: (choice: number) => {
+    get().executeDiceResult(choice, false);
   },
 
   syncState: () => {
@@ -541,6 +665,33 @@ export const useGameStore = create<GameState>((set, get) => ({
     let newPawns = [...pawns];
     let newPos = pawn.position === -1 ? 0 : pawn.position + diceResult;
     
+    // Check Traps first so newPos is final
+    if (newPos >= 0 && newPos <= 50) {
+       const clone = { ...pawn, position: newPos };
+       const myAbsPos = getAbsolutePosition(clone);
+       if (room?.gameMode === 'powers' && room.traps && room.traps.includes(myAbsPos)) {
+           const triggeredTrapIndex = room.traps.indexOf(myAbsPos);
+           const spacesBack = Math.floor(Math.random() * 10) + 1;
+           newPos = Math.max(0, Math.min(newPos - spacesBack, 50)); // Don't allow it to go negative. Start is 0 (first square outside base)
+           if (!isOffline && socket) {
+              const msg = `Armadilha! A peça de ${turn} caiu numa armadilha e voltou ${Math.min(spacesBack, pawn.position + diceResult - newPos)} casas.`;
+              socket.emit('send_message', { roomId: room.id, message: msg, sender: 'Poderes' });
+              get().addMessage({ id: Date.now().toString(), sender: 'Poderes', text: msg, timestamp: Date.now() });
+           }
+           // Generating new trap
+           let newTrapPos = Math.floor(Math.random() * 52);
+           while (ABSOLUTE_SAFE_SQUARES.includes(newTrapPos) || room.traps.includes(newTrapPos)) {
+              newTrapPos = Math.floor(Math.random() * 52);
+           }
+           const newTraps = [...room.traps];
+           newTraps[triggeredTrapIndex] = newTrapPos;
+           if (!isOffline && socket) {
+              socket.emit('sync_state', { roomId: room.id, traps: newTraps });
+           }
+           set({ room: { ...room, traps: newTraps } });
+       }
+    }
+
     // Check capture
     let captured = false;
     if (newPos >= 0 && newPos <= 50) {
@@ -550,6 +701,10 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (!ABSOLUTE_SAFE_SQUARES.includes(myAbsPos)) {
         newPawns = newPawns.map(p2 => {
           if (p2.color !== turn && p2.position >= 0 && p2.position <= 50 && getAbsolutePosition(p2) === myAbsPos) {
+             const targetEffects = room?.powerEffects?.[p2.color];
+             if (room?.gameMode === 'powers' && targetEffects?.shield && targetEffects.shield > 0) {
+                 return p2; // Shielded!
+             }
             captured = true;
             if (soundEnabled) {
                import('../lib/sounds').then(({ playSound }) => playSound('capture'));
@@ -700,80 +855,91 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
   
+  triggerPower: (color: PlayerColor) => {
+    const { room, socket, isOffline, pawns } = get();
+    if (!room) return;
+
+    const powers = ['EMPURRAO', 'BLOQUEIO_DE_DADO', 'ESCUDO', 'MODO_TURBO', 'MALDICAO', 'ROLAGEM_DUPLA'];
+    const randomPower = powers[Math.floor(Math.random() * powers.length)];
+
+    let newEffects = { ...room.powerEffects };
+    if (!newEffects[color]) newEffects[color] = {};
+    
+    let messageText = '';
+    const activeColors = room.players.map((p: any) => p.color).filter(Boolean);
+    const enemies = activeColors.filter(c => c !== color);
+    const randomEnemy = enemies[Math.floor(Math.random() * enemies.length)];
+
+    if (randomPower === 'EMPURRAO') {
+        const enemyPawns = pawns.filter(p => enemies.includes(p.color) && p.position > 0 && p.position <= 50);
+        if (enemyPawns.length > 0) {
+            const target = enemyPawns[Math.floor(Math.random() * enemyPawns.length)];
+            const spacesBack = Math.floor(Math.random() * 5) + 1;
+            const newPos = Math.max(1, target.position - spacesBack);
+            messageText = `Empurrão! A peça inimiga de ${target.color} voltou ${target.position - newPos} casas.`;
+            get().applyMoveLocally(target.id, -(target.position - newPos)); // A bit hacky but works for position change
+            // we will need to update position explicitly
+            setTimeout(() => {
+                const p = get().pawns;
+                const cloned = [...p];
+                const pt = cloned.find(px => px.id === target.id);
+                if (pt) pt.position = newPos;
+                set({ pawns: cloned });
+                get().syncState();
+            }, 100);
+        } else {
+            messageText = `Empurrão! Mas não havia peças inimigas no tabuleiro.`;
+        }
+    } else if (randomPower === 'BLOQUEIO_DE_DADO') {
+        if (!newEffects[randomEnemy]) newEffects[randomEnemy] = {};
+        newEffects[randomEnemy].diceBlock = 1;
+        messageText = `Bloqueio de Dado! O jogador ${randomEnemy} só poderá tirar até 3 na próxima rodada.`;
+    } else if (randomPower === 'ESCUDO') {
+        newEffects[color].shield = 1;
+        messageText = `Escudo! O jogador ${color} está imune a capturas por 1 rodada.`;
+    } else if (randomPower === 'MODO_TURBO') {
+        newEffects[color].turbo = 1;
+        messageText = `Modo Turbo! O jogador ${color} andará o dobro no seu próximo turno.`;
+    } else if (randomPower === 'MALDICAO') {
+        if (!newEffects[randomEnemy]) newEffects[randomEnemy] = {};
+        newEffects[randomEnemy].curse = 1;
+        messageText = `Maldição! O jogador ${randomEnemy} irá parar e andar apenas 1 casa.`;
+    } else if (randomPower === 'ROLAGEM_DUPLA') {
+        newEffects[color].doubleRoll = 1;
+        messageText = `Rolagem Dupla! O jogador ${color} vai rolar dois dados no próximo turno.`;
+    }
+
+    if (!isOffline && socket) {
+      socket.emit('send_message', { roomId: room.id, message: messageText, sender: 'Poderes' });
+      socket.emit('sync_state', { roomId: room.id, powerEffects: newEffects });
+    }
+    set({ room: { ...room, powerEffects: newEffects } });
+    get().addMessage({ id: Date.now().toString(), sender: 'Poderes', text: messageText, timestamp: Date.now() });
+  },
+
   playBotTurn: (botColor: PlayerColor) => {
     if (!get().shouldManageTurn()) return;
     
-    const executeMove = (result: number) => {
-      setTimeout(() => {
-        const { pawns } = get();
-        const botPawns = pawns.filter(p => p.color === botColor);
-        const validMoves = botPawns.filter(p => canPlay(p, result));
-        
-        if (validMoves.length > 0) {
-          // 1. Capture enemy
-          const captureMoves = validMoves.filter(p => {
-             let newPos = p.position === -1 ? 0 : p.position + result;
-             if (newPos >= 0 && newPos <= 50) {
-                const clone = { ...p, position: newPos };
-                const myAbsPos = getAbsolutePosition(clone);
-                if (!ABSOLUTE_SAFE_SQUARES.includes(myAbsPos)) {
-                   return pawns.some(p2 => p2.color !== botColor && p2.position >= 0 && p2.position <= 50 && getAbsolutePosition(p2) === myAbsPos);
-                }
-             }
-             return false;
-          });
-
-          // 2. Spawn a pawn out of the base (priority if 6)
-          const spawningMoves = validMoves.filter(p => p.position === -1);
-
-          // 3. Flee from danger or enter finish line
-          const finishLineMoves = validMoves.filter(p => p.position !== -1 && p.position + result > 50);
-          const fleeingMoves = validMoves.filter(p => {
-             if (p.position === -1 || p.position > 50) return false;
-             const myAbs = getAbsolutePosition(p);
-             if (ABSOLUTE_SAFE_SQUARES.includes(myAbs)) return false;
-             return pawns.some(p2 => {
-                if (p2.color === botColor || p2.position < 0 || p2.position > 50) return false;
-                const enemyAbs = getAbsolutePosition(p2);
-                const diff = (myAbs - enemyAbs + 52) % 52;
-                return diff > 0 && diff <= 6;
-             });
-          });
-
-          // 4. Move the most advanced piece
-          const mostAdvancedMoves = [...validMoves].sort((a, b) => b.position - a.position);
-
-          const pawnToMove = captureMoves[0] || spawningMoves[0] || finishLineMoves[0] || fleeingMoves[0] || mostAdvancedMoves[0];
-
-          get().movePawn(pawnToMove.id);
-        } else {
-          if (result === 6) {
-             set({ diceValue: null });
-             get().playBotTurn(botColor);
-          } else {
-             get().nextTurn();
-          }
-        }
-      }, 800);
-    };
-
     if (get().diceValue !== null) {
-      // Already rolled
-      set({ isRolling: false });
-      executeMove(get().diceValue!);
+      get().executeDiceResult(get().diceValue!, true);
     } else {
       set({ isRolling: true });
       setTimeout(() => {
-        const result = Math.floor(Math.random() * 6) + 1;
-        set({ diceValue: result, isRolling: false });
-        
-        const { socket, room, isOffline } = get();
-        if (!isOffline && socket && room) {
-           socket.emit('roll_dice', { roomId: room.id, result });
+        const { room } = get();
+        let maxRoll = 6;
+        if (room?.gameMode === 'powers' && room?.powerEffects?.[botColor]?.diceBlock && room.powerEffects[botColor].diceBlock! > 0) {
+           maxRoll = 3;
         }
-        get().syncState();
+
+        let result = Math.floor(Math.random() * maxRoll) + 1;
         
-        executeMove(result);
+        const doubleRollData = room?.powerEffects?.[botColor]?.doubleRoll;
+        if (room && room.gameMode === 'powers' && doubleRollData && doubleRollData > 0) {
+           const result2 = Math.floor(Math.random() * maxRoll) + 1;
+           result = Math.max(result, result2); 
+        }
+        
+        get().executeDiceResult(result, true);
       }, 600);
     }
   },

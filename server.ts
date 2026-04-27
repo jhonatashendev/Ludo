@@ -249,7 +249,7 @@ async function startServer() {
     socket.on("create_room", (data, callback) => {
       const roomId = data.roomId || Math.random().toString(36).substring(2, 8);
       const isPrivate = !!data.password;
-      const validBet = Math.max(100, Number(data.betAmount) || 0);
+      const validBet = Math.max(0, Number(data.betAmount) || 0);
 
       rooms.set(roomId, {
         id: roomId,
@@ -262,6 +262,9 @@ async function startServer() {
         gameState: 'waiting',
         pot: validBet * 4,
         betAmount: validBet,
+        gameMode: data.gameMode || 'classic',
+        traps: [],
+        powerEffects: {},
         isPrivate: isPrivate,
         password: data.password || null
       });
@@ -364,6 +367,19 @@ async function startServer() {
       const activeColors = room.players.map((p: any) => p.color);
       const firstTurn = colors.filter(c => activeColors.includes(c))[0];
 
+      // Generate traps if gameMode is powers
+      if (room.gameMode === 'powers') {
+         const traps: number[] = [];
+         while (traps.length < 2) {
+            const r = Math.floor(Math.random() * 52);
+            if (![0, 8, 13, 21, 26, 34, 39, 47].includes(r) && !traps.includes(r)) {
+               traps.push(r);
+            }
+         }
+         room.traps = traps;
+         room.powerEffects = {};
+      }
+
       io.to(roomId).emit("game_started", { room, turn: firstTurn });
       io.emit("rooms_list_update"); // To hide from public list
       if (callback) callback({ success: true });
@@ -393,7 +409,14 @@ async function startServer() {
          room.pawns = data.pawns;
          room.turn = data.turn;
          room.diceValue = data.diceValue;
+         if (data.traps !== undefined) room.traps = data.traps;
+         if (data.powerEffects !== undefined) room.powerEffects = data.powerEffects;
       }
+    });
+
+    socket.on("power_triggered", (data) => {
+      // Broadcast power effects / messages to the room
+      io.to(data.roomId).emit("power_triggered", data);
     });
 
     socket.on("play_again", (roomId) => {
@@ -403,6 +426,12 @@ async function startServer() {
          room.finishedPlayers = [];
          room.botLoopRunning = false;
          
+         // Keep existing gameMode
+         if (room.gameMode === 'powers') {
+           room.traps = [];
+           room.powerEffects = {};
+         }
+
          // Only keep non-forfeited humans and bots
          room.players = room.players.filter((p: any) => !p.isForfeited);
          
@@ -453,7 +482,8 @@ async function startServer() {
              }
           } else {
              room.players.splice(playerIndex, 1);
-             if (room.players.length === 0) {
+             const humanCountLeft = room.players.filter((p: any) => !p.id.startsWith('bot_') && !p.isBot).length;
+             if (humanCountLeft === 0) {
                 rooms.delete(roomId);
              }
           }
@@ -485,7 +515,8 @@ async function startServer() {
              }
           } else {
              room.players = room.players.filter((p: any) => p.id !== socket.id);
-             if (room.players.length === 0) {
+             const humanCountLeft = room.players.filter((p: any) => !p.id.startsWith('bot_') && !p.isBot).length;
+             if (humanCountLeft === 0) {
                 rooms.delete(roomId);
              }
           }
@@ -524,6 +555,7 @@ async function startServer() {
        const spotIndex = room.players.findIndex((p: any) => p.name === playerInfo.username);
        if (spotIndex !== -1) {
           room.players[spotIndex].name = `Robô (${playerInfo.username})`;
+          room.players[spotIndex].id = 'bot_' + Math.random().toString(36).substring(7);
           room.players[spotIndex].isDisconnected = false; // it's completely a bot now
           room.players[spotIndex].isBot = true;
           room.players[spotIndex].isForfeited = true;

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../store/gameStore';
-import { Mic, MicOff, Send, LogOut, Coins, Users, MessageSquare, X, Dices, Play } from 'lucide-react';
+import { Mic, MicOff, Send, LogOut, Coins, Users, MessageSquare, X, Dices, Play, Info } from 'lucide-react';
 import { Board2D } from './Board2D';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -11,8 +11,11 @@ export function RoomView() {
   const addBotOnline = useGameStore(state => state.addBotOnline);
   const startGameOnline = useGameStore(state => state.startGameOnline);
   const playAgain = useGameStore(state => state.playAgain);
+  const selectDiceChoice = useGameStore(state => state.selectDiceChoice);
   const diceValue = useGameStore(state => state.diceValue);
+  const diceChoices = useGameStore(state => state.diceChoices);
   const isRolling = useGameStore(state => state.isRolling);
+  const [showRules, setShowRules] = React.useState(false);
   const turn = useGameStore(state => state.turn);
   const myColor = useGameStore(state => state.myColor);
   const gameOverMessage = useGameStore(state => state.gameOverMessage);
@@ -88,6 +91,11 @@ export function RoomView() {
             <button onClick={handleLeaveClick} className="p-2 glass rounded-full hover:bg-white/20 transition">
               <LogOut size={20} />
             </button>
+            {room?.gameMode === 'powers' && (
+              <button onClick={() => setShowRules(true)} className="p-2 glass rounded-full hover:bg-white/20 transition bg-purple-500/20 text-purple-300">
+                <Info size={20} />
+              </button>
+            )}
             <div className="flex items-center gap-2 px-4 py-2 glass rounded-[24px]">
               <Coins size={16} className="text-yellow-400 drop-shadow-[0_0_8px_rgba(234,179,8,0.5)]" />
               <span className="font-mono font-bold text-sm text-yellow-400">Pot: {room.pot || 0}</span>
@@ -195,7 +203,7 @@ export function RoomView() {
               )}
             </div>
 
-            {diceValue && !isRolling && (
+            {diceValue && !isRolling && !diceChoices && (
                <motion.div 
                  initial={{ scale: 0, rotate: -180 }}
                  animate={{ scale: 1, rotate: 0 }}
@@ -204,6 +212,29 @@ export function RoomView() {
                  <span className={`text-4xl font-black ${turn === 'RED' ? 'text-red-500' : turn === 'GREEN' ? 'text-green-500' : turn === 'YELLOW' ? 'text-yellow-500' : 'text-blue-500'}`}>{diceValue}</span>
                </motion.div>
             )}
+
+            {diceChoices && turn === myColor && (
+              <div className="flex gap-4">
+                <button 
+                  onClick={() => selectDiceChoice(diceChoices[0])}
+                  className="w-16 h-16 bg-white rounded-2xl shadow-lg border-4 border-slate-200 flex items-center justify-center hover:scale-110 transition-all cursor-pointer"
+                >
+                  <span className="text-4xl font-black text-slate-800">{diceChoices[0]}</span>
+                </button>
+                <button 
+                  onClick={() => selectDiceChoice(diceChoices[1])}
+                  className="w-16 h-16 bg-white rounded-2xl shadow-lg border-4 border-slate-200 flex items-center justify-center hover:scale-110 transition-all cursor-pointer"
+                >
+                  <span className="text-4xl font-black text-slate-800">{diceChoices[1]}</span>
+                </button>
+              </div>
+            )}
+            
+            {diceChoices && turn !== myColor && (
+              <div className="bg-black/50 px-4 py-2 rounded-xl text-white font-bold text-sm">
+                Escolhendo dado...
+              </div>
+            )}
             
             {isRolling && (
               <div className="w-16 h-16 bg-white rounded-2xl shadow-lg border-4 border-slate-200 animate-spin flex items-center justify-center">
@@ -211,7 +242,7 @@ export function RoomView() {
               </div>
             )}
 
-            {turn === myColor && !diceValue && !isRolling && (
+            {turn === myColor && !diceValue && !isRolling && !diceChoices && (
               <button 
                 onClick={rollDice}
                 className="px-6 py-3 sm:px-8 sm:py-4 bg-gradient-to-r from-red-500 to-rose-600 rounded-[28px] font-black text-lg sm:text-xl tracking-widest uppercase shadow-[0_0_20px_rgba(244,63,94,0.5)] border border-white/20 hover:scale-105 active:scale-95 transition-all text-white flex gap-2 items-center"
@@ -308,6 +339,75 @@ export function RoomView() {
       </AnimatePresence>
 
       {/* Forfeit Confirmation Modal */}
+      <AnimatePresence>
+        {showRules && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
+              onClick={() => setShowRules(false)}
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="glass-panel w-full max-w-md max-h-[80vh] overflow-y-auto rounded-[32px] z-10 flex flex-col border border-white/20 p-6 shadow-2xl relative"
+            >
+              <button 
+                onClick={() => setShowRules(false)}
+                className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 transition text-white"
+              >
+                <X size={20} />
+              </button>
+              <h2 className="text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-pink-500 font-['Anton'] uppercase tracking-widest mb-6 border-b border-white/10 pb-4 text-center mt-2">
+                Modo Poderes
+              </h2>
+              
+              <div className="space-y-4 text-sm text-white/90">
+                <p className="bg-purple-500/20 p-3 rounded-xl border border-purple-500/30">
+                  <strong className="text-purple-300 uppercase block mb-1">Como ganho um poder?</strong>
+                  Sempre que um jogador tirar <strong>1</strong> no dado, ele receberá um poder aleatório.
+                </p>
+
+                <div className="space-y-3">
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-blue-400 block">Empurrão</strong>
+                     Você empurra uma peça inimiga aleatória de 1 a 5 casas para trás.
+                  </div>
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-red-400 block">Bloqueio de Dado</strong>
+                     Um inimigo escolhido só poderá tirar até 3 na próxima rodada (e não ganhará poder se tirar 1).
+                  </div>
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-green-400 block">Escudo</strong>
+                     Suas peças não podem ser capturadas durante 1 volta inteira até seu próximo turno.
+                  </div>
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-yellow-400 block">Modo Turbo</strong>
+                     Ande o dobro do valor que tirar no dado na sua próxima jogada.
+                  </div>
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-orange-400 block">Maldição</strong>
+                     Um inimigo amaldiçoado irá automaticamente andar apenas 1 casa em sua próxima rodada.
+                  </div>
+                  <div className="bg-black/40 p-3 rounded-xl border border-white/5">
+                     <strong className="text-pink-400 block">Rolagem Dupla</strong>
+                     Role dois dados de uma vez e escolha qual usar no seu próximo turno.
+                  </div>
+                </div>
+
+                <div className="mt-4 bg-red-500/20 p-3 rounded-xl border border-red-500/30">
+                  <strong className="text-red-300 uppercase block mb-1">Cuidado com Armadilhas!</strong>
+                  Existem 2 armadilhas invisíveis no mapa! Pisou nelas, voltará de 1 a 10 casas. Após ser ativada ela muda de lugar.
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {showForfeitModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
