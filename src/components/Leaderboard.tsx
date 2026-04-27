@@ -1,19 +1,29 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useGameStore, Player } from '../store/gameStore';
 import { ChevronLeft, Trophy, Medal } from 'lucide-react';
 import { motion } from 'motion/react';
-
-const MOCK_LEADERBOARD = [
-  { id: 'usr_1', username: 'LudoKing99', coins: 4500000 },
-  { id: 'usr_2', username: 'DiceMaster', coins: 3200000 },
-  { id: 'usr_3', username: 'ProGamerX', coins: 1800000 },
-  { id: 'usr_4', username: 'LuckyStrike', coins: 950000 },
-  { id: 'usr_5', username: 'AlexW', coins: 820000 },
-  { id: 'usr_6', username: 'Shadow_1', coins: 640000 },
-];
+import { collection, query, orderBy, limit, getDocs } from 'firebase/firestore';
+import { db } from '../lib/firebase';
 
 export function Leaderboard() {
   const { setView } = useGameStore();
+  const [users, setUsers] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchUsers = async () => {
+      try {
+        const q = query(collection(db, 'users'), orderBy('coins', 'desc'), limit(50));
+        const qs = await getDocs(q);
+        const data = qs.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        if (data.length > 0) {
+           setUsers(data);
+        }
+      } catch (err) {
+        console.error("Erro ao buscar leaderboard", err);
+      }
+    };
+    fetchUsers();
+  }, []);
 
   return (
     <div className="flex flex-col h-screen bg-transparent text-white overflow-y-auto">
@@ -21,7 +31,7 @@ export function Leaderboard() {
         <button onClick={() => setView('lobby')} className="p-2 glass rounded-[24px] hover:bg-white/10 transition">
           <ChevronLeft size={20} />
         </button>
-        <div className="font-['Anton'] uppercase tracking-widest text-lg">Global Ranking</div>
+        <div className="font-['Anton'] uppercase tracking-widest text-lg">Top Jogadores</div>
         <div className="w-10"></div>
       </div>
 
@@ -34,11 +44,11 @@ export function Leaderboard() {
         </div>
 
         <div className="space-y-3">
-          {MOCK_LEADERBOARD.map((user, index) => (
+          {users.map((user, index) => (
             <motion.div 
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.1 }}
+              transition={{ delay: index * 0.05 }}
               key={user.id} 
               className={`flex items-center justify-between p-4 glass-panel ${
                 index === 0 ? 'bg-yellow-500/10 border-yellow-500/30' : 
@@ -57,10 +67,13 @@ export function Leaderboard() {
                 <div className="font-bold tracking-wide">{user.username}</div>
               </div>
               <div className="font-mono text-sm text-yellow-400 flex items-center gap-1.5 font-bold">
-               {user.coins.toLocaleString()}
+               {user.coins?.toLocaleString()}
               </div>
             </motion.div>
           ))}
+          {users.length === 0 && (
+             <div className="text-center p-8 text-white/50 font-bold uppercase tracking-widest text-sm">Nenhum jogador encontrado</div>
+          )}
         </div>
       </div>
     </div>

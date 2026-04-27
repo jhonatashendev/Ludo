@@ -40,6 +40,7 @@ interface GameState {
   turn: PlayerColor;
   diceValue: number | null;
   isRolling: boolean;
+  activeRoomId: string | null;
   betAmount: number;
   finishedPlayers: PlayerColor[];
   gameOverMessage: string | null;
@@ -52,6 +53,9 @@ interface GameState {
   joinRoom: (roomId: string, password?: string) => Promise<any>;
   addBotOnline: () => void;
   startGameOnline: () => void;
+  playAgain: () => void;
+  rejoinRoom: () => Promise<void>;
+  forfeitRoom: () => Promise<void>;
   startOfflineGame: (bet?: number) => void;
   leaveRoom: () => void;
   sendMessage: (text: string) => void;
@@ -64,6 +68,7 @@ interface GameState {
   rollDice: () => void;
   movePawn: (pawnId: string) => void;
   applyMoveLocally: (pawnId: string, diceResult: number) => void;
+  syncState: () => void;
   shouldManageTurn: () => boolean;
   nextTurn: () => void;
   playBotTurn: (color: PlayerColor) => void;
@@ -86,6 +91,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   turn: 'RED',
   diceValue: null,
   isRolling: false,
+  activeRoomId: null,
   betAmount: 0,
   finishedPlayers: [],
   gameOverMessage: null,
@@ -101,7 +107,11 @@ export const useGameStore = create<GameState>((set, get) => ({
     }));
     const { socket } = get();
     if (socket) {
-      socket.emit('update_profile', { username });
+      socket.emit('update_profile', { username, coins: initialCoins }, (res: any) => {
+         if (res && res.success && res.activeRoomId) {
+            set({ activeRoomId: res.activeRoomId });
+         }
+      });
     }
   },
 
@@ -128,13 +138,44 @@ export const useGameStore = create<GameState>((set, get) => ({
        // We keep the existing username if we already authenticated and have a player state
        if (existingPlayer && existingPlayer.username && existingPlayer.id === 'local') {
           set({ player: { ...player, username: existingPlayer.username } });
-          socket.emit('update_profile', { username: existingPlayer.username });
+          socket.emit('update_profile', { username: existingPlayer.username, coins: existingPlayer.coins }, (res: any) => {
+             if (res.success && res.activeRoomId) {
+                // Let the user decide to rejoin or not (we'll store it in state)
+                set({ activeRoomId: res.activeRoomId });
+             }
+          });
        } else {
           set({ player });
        }
     });
+    
+    socket.on('force_disconnect', (data: any) => {
+       alert(data.reason || "Desconectado pelo servidor.");
+       window.location.reload();
+    });
     socket.on('room_update', (room: Room) => {
-       if (!get().isOffline) set({ room });
+       if (!get().isOffline) {
+           const updates: Partial<GameState> = { room };
+           if (room.gameState === 'waiting') {
+              updates.gameOverMessage = null;
+              updates.finishedPlayers = [];
+           }
+           set(updates);
+
+           const { turn, isRolling } = get();
+           if (room.gameState === 'playing' && !isRolling) {
+               const roomPlayers = room.players || [];
+               const firstHuman = roomPlayers.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+               const isHost = firstHuman?.id === socket.id;
+               const isBotTurn = roomPlayers.find((p: any) => p.color === turn && p.isBot);
+               
+               if (isHost && isBotTurn) {
+                  // Trigger bot turn if a player just disconnected and we inherited host duties
+                  set({ isRolling: true });
+                  setTimeout(() => get().playBotTurn(turn), 1500);
+               }
+           }
+       }
     });
     socket.on('receive_message', (msg: Message) => {
        if (!get().isOffline) {
@@ -159,8 +200,10 @@ export const useGameStore = create<GameState>((set, get) => ({
             myColor: myPlayer?.color || 'RED'
           });
 
-          const isHost = data.room.players[0].id === socket.id;
+          const firstHuman = data.room.players.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+          const isHost = firstHuman?.id === socket.id;
           const isBotTurn = data.room.players.find((p: any) => p.color === data.turn && p.isBot);
+          if (isHost) get().syncState();
           if (isHost && isBotTurn) {
              setTimeout(() => get().playBotTurn(data.turn), 1500);
           }
@@ -184,10 +227,12 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     socket.on('turn_changed', (data: any) => {
        if (!get().isOffline) {
-          set({ turn: data.turn, diceValue: null });
+          set({ turn: data.turn, diceValue: null, isRolling: false });
           
-          const isHost = get().room?.players[0].id === socket.id;
-          const isBotTurn = get().room?.players.find((p: any) => p.color === data.turn && p.isBot);
+          const roomPlayers = get().room?.players || [];
+          const firstHuman = roomPlayers.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+          const isHost = firstHuman?.id === socket.id;
+          const isBotTurn = roomPlayers.find((p: any) => p.color === data.turn && p.isBot);
           
           if (isHost && isBotTurn) {
              setTimeout(() => get().playBotTurn(data.turn), 1000);
@@ -277,6 +322,59 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
   },
 
+  playAgain: () => {
+     const { isOffline, room, socket, startOfflineGame, betAmount, myColor } = get();
+     if (isOffline) {
+        startOfflineGame(betAmount);
+     } else if (socket && room) {
+        // If they choose play again online, they emit this to server
+        socket.emit('play_again', room.id);
+     }
+  },
+
+  rejoinRoom: () => {
+    return new Promise((resolve) => {
+       const { socket, activeRoomId } = get();
+       if (!socket || !activeRoomId) return resolve();
+       socket.emit('rejoin_room', activeRoomId, (res: any) => {
+          if (res.success) {
+            const myPlayer = res.room.players.find((p: any) => p.name === get().player?.username);
+            set({ 
+              activeRoomId: null, 
+              view: 'room', 
+              room: res.room,
+              isOffline: false,
+              myColor: myPlayer?.color || 'RED',
+              pawns: (res.room.pawns && res.room.pawns.length > 0) ? res.room.pawns : initializePawns(res.room.players.map((p: any) => p.color).filter(Boolean)),
+              turn: res.room.turn || 'RED',
+              diceValue: res.room.diceValue || null,
+            });
+            setTimeout(() => {
+                const { turn, isRolling, room } = get();
+                if (!isRolling && get().shouldManageTurn()) {
+                   const isBotTurn = room?.players.find((p: any) => p.color === turn && p.isBot);
+                   if (isBotTurn) {
+                       get().playBotTurn(turn);
+                   }
+                }
+            }, 1000);
+          }
+          resolve();
+       });
+    });
+  },
+
+  forfeitRoom: () => {
+    return new Promise((resolve) => {
+       const { socket, activeRoomId } = get();
+       if (!socket || !activeRoomId) return resolve();
+       socket.emit('forfeit_room', activeRoomId, () => {
+          set({ activeRoomId: null });
+          resolve();
+       });
+    });
+  },
+
   startOfflineGame: (bet = 0) => {
     const { player, updateCoins } = get();
     if (!player) return;
@@ -319,12 +417,16 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   leaveRoom: () => {
-    const { socket, room, isOffline } = get();
+    const { socket, room, isOffline, player } = get();
     if (isOffline) {
       set({ room: null, view: 'lobby', messages: [], isOffline: false });
     } else if (socket && room) {
-      // socket.emit('leave_room', room.id); // Implement on server if needed
-      set({ room: null, view: 'lobby', messages: [], isOffline: false });
+      socket.emit('leave_room', room.id);
+      let newActiveRoomId = get().activeRoomId;
+      if (room.gameState === 'playing' && player && room.players.find((p: any) => p.id === socket.id)) {
+        newActiveRoomId = room.id;
+      }
+      set({ room: null, view: 'lobby', messages: [], isOffline: false, activeRoomId: newActiveRoomId });
     }
   },
 
@@ -373,6 +475,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (!isOffline && socket && room) {
         socket.emit('roll_dice', { roomId: room.id, result });
       }
+      get().syncState();
 
       const { pawns } = get();
       const myPawns = pawns.filter(p => p.color === turn);
@@ -400,12 +503,28 @@ export const useGameStore = create<GameState>((set, get) => ({
     }, 600);
   },
 
+  syncState: () => {
+    const { isOffline, socket, room, pawns, turn, diceValue } = get();
+    if (!isOffline && socket && room && room.players.length > 0) {
+       const firstHuman = room.players.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+       if (firstHuman?.id === socket.id) {
+          socket.emit('sync_state', { roomId: room.id, pawns, turn, diceValue });
+       }
+    }
+  },
+
   shouldManageTurn: () => {
     const { isOffline, myColor, turn, room, socket } = get();
     if (isOffline) return true;
     if (turn === myColor) return true;
     const isBot = room?.players.find((p: any) => p.color === turn && p.isBot);
-    const isHost = room?.players[0].id === socket?.id;
+    // Find the first player who is NOT disconnected (which means they are a real human client in the room)
+    const connectedPlayers = room?.players.filter((p: any) => !p.isDisconnected && (p.id === socket?.id || typeof p.id === 'string')); // A bit hacky, but better to check if it's the current client who should act as host
+    // Actually, any bot that was added as bot has NO socket id, it has id like `bot_${id}`.
+    // Disconnected humans have isDisconnected = true.
+    // So connected humans are those where `!p.isDisconnected && !p.id.startsWith('bot_')` OR just rely on isDisconnected.
+    const firstHuman = room?.players.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+    const isHost = firstHuman?.id === socket?.id;
     return !!(isBot && isHost);
   },
 
@@ -466,26 +585,39 @@ export const useGameStore = create<GameState>((set, get) => ({
     const ORDER: PlayerColor[] = ['RED', 'GREEN', 'YELLOW', 'BLUE'];
     const gameColors = ORDER.filter(c => activeColors.includes(c));
 
-    // Check if game over (N-1 players finished = Nth automatically finished)
-    if (gameColors.length > 1 && newFinishedPlayers.length === gameColors.length - 1 && gameOverMessage === null) {
-      const lastPlayer = gameColors.find(c => !newFinishedPlayers.includes(c))!;
-      newFinishedPlayers.push(lastPlayer);
+    const finishThreshold = Math.min(2, gameColors.length - 1);
+
+    // Check if game over
+    if (gameColors.length > 1 && newFinishedPlayers.length >= finishThreshold && gameOverMessage === null) {
+      const remaining = gameColors.filter(c => !newFinishedPlayers.includes(c));
+      remaining.sort((a, b) => {
+         const getProgress = (color: PlayerColor) => newPawns.filter(p => p.color === color).reduce((acc, p) => acc + (p.position === -1 ? -1 : p.position), 0);
+         return getProgress(b) - getProgress(a);
+      });
+      newFinishedPlayers.push(...remaining);
       
       const humanPos = newFinishedPlayers.indexOf(get().myColor) + 1;
       let wonAmount = 0;
-      const totalPot = betAmount * 4;
+      let actualPot = betAmount * gameColors.length;
+      if (!isOffline && room && room.pot) actualPot = room.pot;
 
-      if (humanPos === 1) wonAmount = totalPot * 0.5;
-      else if (humanPos === 2) wonAmount = totalPot * 0.3;
-      else if (humanPos === 3) wonAmount = totalPot * 0.1;
+      if (humanPos === 1) { // 1st wins the whole pot
+         wonAmount = actualPot;
+      }
       
-      if (betAmount > 0) {
-        updateCoins((player?.coins || 0) + wonAmount);
+      if (wonAmount > 0 && player) {
+          updateCoins((player.coins || 0) + wonAmount);
       }
 
-      newGameOverMessage = betAmount > 0 
-        ? `Fim de Jogo! Você ficou em ${humanPos}º lugar e ganhou ${wonAmount.toLocaleString()} moedas!` 
-        : `Fim de Jogo! Você ficou em ${humanPos}º lugar!`;
+      if (humanPos === 1) {
+          newGameOverMessage = (actualPot > 0)
+            ? `VOCÊ VENCEU! 1º Lugar! Ganhou ${actualPot.toLocaleString()} moedas!` 
+            : `VOCÊ VENCEU! 1º Lugar!`;
+      } else {
+          newGameOverMessage = (actualPot > 0)
+            ? `Fim de Jogo! Você ficou em ${humanPos}º lugar. O 1º lugar levou ${actualPot.toLocaleString()} moedas.` 
+            : `Fim de Jogo! Você ficou em ${humanPos}º lugar!`;
+      }
     }
 
     set({ pawns: newPawns, finishedPlayers: newFinishedPlayers, gameOverMessage: newGameOverMessage });
@@ -494,7 +626,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     // If rolled 6 or captured, extra turn, else nextTurn
     if ((diceResult === 6 || captured) && !hasFinished) {
-       set({ diceValue: null });
+       set({ diceValue: null, isRolling: false });
+       get().syncState();
        if (get().shouldManageTurn()) {
          const isBot = (!isOffline && room?.players.find((p: any) => p.color === turn && p.isBot)) || (isOffline && turn !== get().myColor);
          if (isBot) {
@@ -545,14 +678,22 @@ export const useGameStore = create<GameState>((set, get) => ({
       nextTurn = colors[(currentIdx + 1) % colors.length];
     }
     
-    set({ turn: nextTurn, diceValue: null });
+    set({ turn: nextTurn, diceValue: null, isRolling: false });
+    get().syncState();
     
     if (!isOffline && socket && room) {
        socket.emit('next_turn', { roomId: room.id, turn: nextTurn });
     }
 
     const nextIsBot = (!isOffline && room?.players.find((p: any) => p.color === nextTurn && p.isBot)) || (isOffline && nextTurn !== myColor);
-    const nextCanManage = isOffline;
+    
+    let nextCanManage = isOffline;
+    if (!isOffline && socket && room) {
+       const firstHuman = room.players.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+       if (firstHuman?.id === socket.id) {
+          nextCanManage = true;
+       }
+    }
     
     if (nextCanManage && nextIsBot) {
        setTimeout(() => get().playBotTurn(nextTurn), 1000);
@@ -561,16 +702,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   
   playBotTurn: (botColor: PlayerColor) => {
     if (!get().shouldManageTurn()) return;
-    set({ isRolling: true });
-    setTimeout(() => {
-      const result = Math.floor(Math.random() * 6) + 1;
-      set({ diceValue: result, isRolling: false });
-      
-      const { socket, room, isOffline } = get();
-      if (!isOffline && socket && room) {
-         socket.emit('roll_dice', { roomId: room.id, result });
-      }
-      
+    
+    const executeMove = (result: number) => {
       setTimeout(() => {
         const { pawns } = get();
         const botPawns = pawns.filter(p => p.color === botColor);
@@ -622,7 +755,27 @@ export const useGameStore = create<GameState>((set, get) => ({
           }
         }
       }, 800);
-    }, 600);
+    };
+
+    if (get().diceValue !== null) {
+      // Already rolled
+      set({ isRolling: false });
+      executeMove(get().diceValue!);
+    } else {
+      set({ isRolling: true });
+      setTimeout(() => {
+        const result = Math.floor(Math.random() * 6) + 1;
+        set({ diceValue: result, isRolling: false });
+        
+        const { socket, room, isOffline } = get();
+        if (!isOffline && socket && room) {
+           socket.emit('roll_dice', { roomId: room.id, result });
+        }
+        get().syncState();
+        
+        executeMove(result);
+      }, 600);
+    }
   },
 
   setView: (view) => set({ view }),

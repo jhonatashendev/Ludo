@@ -18,19 +18,18 @@ export default function App() {
       setFirebaseUser(user);
       
       if (user) {
-        // Hydrate username
-        if (user.displayName) {
-          setCredentials(user.displayName);
-        } else {
-          try {
-            const userDoc = await getDoc(doc(db, 'users', user.uid));
-            if (userDoc.exists()) {
-              const data = userDoc.data();
-              setCredentials(data.username || user.displayName, data.coins ?? 10000);
-            }
-          } catch (e) {
-            console.error("Error fetching user data", e);
+        // Hydrate username and coins
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (userDoc.exists()) {
+            const data = userDoc.data();
+            setCredentials(data.username || user.displayName, data.coins ?? 10000);
+          } else {
+            setCredentials(user.displayName || "Jogador", 10000);
           }
+        } catch (e) {
+          console.error("Error fetching user data", e);
+          setCredentials(user.displayName || "Jogador", 10000);
         }
         connect();
       }

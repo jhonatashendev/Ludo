@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { auth, db } from '../lib/firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { useGameStore } from '../store/gameStore';
 
 export function Login() {
@@ -28,6 +28,12 @@ export function Login() {
         if (!/^[a-zA-Z0-9_\-]+$/.test(username)) {
           throw new Error('Usuário deve conter apenas letras, números e underlines.');
         }
+        
+        const usernameQuery = query(collection(db, 'users'), where('username', '==', username));
+        const usernameSnap = await getDocs(usernameQuery);
+        if (!usernameSnap.empty) {
+           throw new Error('Esse nome de usuário já está em uso.');
+        }
 
         const userCredential = await createUserWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
@@ -43,7 +49,7 @@ export function Login() {
           coins: 10000
         });
 
-        setCredentials(username);
+        setCredentials(username, 10000);
       } else {
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;

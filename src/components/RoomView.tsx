@@ -7,8 +7,10 @@ import { motion, AnimatePresence } from 'motion/react';
 export function RoomView() {
   const { room, player, messages, sendMessage, leaveRoom, voiceEnabled, setVoiceEnabled, isOffline } = useGameStore();
   const rollDice = useGameStore(state => state.rollDice);
+  const playBotTurn = useGameStore(state => state.playBotTurn);
   const addBotOnline = useGameStore(state => state.addBotOnline);
   const startGameOnline = useGameStore(state => state.startGameOnline);
+  const playAgain = useGameStore(state => state.playAgain);
   const diceValue = useGameStore(state => state.diceValue);
   const isRolling = useGameStore(state => state.isRolling);
   const turn = useGameStore(state => state.turn);
@@ -17,6 +19,55 @@ export function RoomView() {
   const [input, setInput] = React.useState('');
   const [isChatOpen, setIsChatOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [showForfeitModal, setShowForfeitModal] = useState(false);
+
+  const handleForfeit = () => {
+    setShowForfeitModal(false);
+    useGameStore.getState().forfeitRoom().then(() => {
+       leaveRoom();
+    });
+  };
+
+  const handleLeaveClick = () => {
+    if (room?.gameState === 'playing' && !isOffline) {
+       setShowForfeitModal(true);
+    } else {
+       leaveRoom();
+    }
+  };
+
+  useEffect(() => {
+    if (isOffline) { setTimeLeft(null); return; }
+    if (room?.gameState !== 'playing') { setTimeLeft(null); return; }
+
+    if (turn === myColor && !gameOverMessage) {
+      if (diceValue === null) {
+        setTimeLeft(3); // 3 seconds to roll
+      } else {
+        setTimeLeft(15); // 15 seconds to play
+      }
+    } else {
+      setTimeLeft(null);
+    }
+  }, [turn, diceValue, myColor, isOffline, room?.gameState, gameOverMessage]);
+
+  useEffect(() => {
+    if (timeLeft === null) return;
+    if (timeLeft <= 0) {
+      if (diceValue === null) {
+        rollDice();
+      } else {
+        playBotTurn(myColor);
+      }
+      setTimeLeft(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      setTimeLeft(prev => prev !== null ? prev - 1 : null);
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [timeLeft, diceValue, rollDice, playBotTurn, myColor]);
 
   useEffect(() => {
     if (isChatOpen) {
@@ -31,14 +82,16 @@ export function RoomView() {
   return (
     <div className="fixed inset-0 bg-[#0c0a1f] text-white overflow-hidden">
       {/* Top Header */}
-      <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-center z-10 pointer-events-none">
-        <div className="flex gap-4 pointer-events-auto">
-          <button onClick={leaveRoom} className="p-2 glass rounded-full hover:bg-white/20 transition">
-            <LogOut size={20} />
-          </button>
-          <div className="flex items-center gap-2 px-4 py-2 glass rounded-[24px]">
-            <Coins size={16} className="text-yellow-400 drop-shadow-[0_0_8px_rgba(234,179,8,0.5)]" />
-            <span className="font-mono font-bold text-sm text-yellow-400">Pot: {room.pot || 0}</span>
+      <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start z-10 pointer-events-none">
+        <div className="flex flex-col gap-2 pointer-events-auto">
+          <div className="flex gap-4">
+            <button onClick={handleLeaveClick} className="p-2 glass rounded-full hover:bg-white/20 transition">
+              <LogOut size={20} />
+            </button>
+            <div className="flex items-center gap-2 px-4 py-2 glass rounded-[24px]">
+              <Coins size={16} className="text-yellow-400 drop-shadow-[0_0_8px_rgba(234,179,8,0.5)]" />
+              <span className="font-mono font-bold text-sm text-yellow-400">Pot: {room.pot || 0}</span>
+            </div>
           </div>
         </div>
 
@@ -106,7 +159,7 @@ export function RoomView() {
                  Aguardando o host iniciar...
                </div>
              )}
-             <button onClick={leaveRoom} className="mt-4 p-3 w-full rounded-2xl bg-white/5 hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 text-white/80 hover:text-red-400 font-bold text-sm uppercase tracking-widest transition flex items-center justify-center gap-2"><LogOut size={16} /> Voltar / Sair da Sala</button>
+             <button onClick={handleLeaveClick} className="mt-4 p-3 w-full rounded-2xl bg-white/5 hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 text-white/80 hover:text-red-400 font-bold text-sm uppercase tracking-widest transition flex items-center justify-center gap-2"><LogOut size={16} /> Voltar / Sair da Sala</button>
           </motion.div>
         </div>
       )}
@@ -130,8 +183,14 @@ export function RoomView() {
               </div>
               
               {!isOffline && (
-                <div className={`px-3 py-1.5 rounded-full font-bold text-xs uppercase tracking-widest bg-black/40 border border-white/20 backdrop-blur shadow-lg text-white/80`}>
+                <div className={`px-3 py-1.5 rounded-full font-bold text-xs uppercase tracking-widest bg-black/40 border border-white/20 backdrop-blur shadow-lg text-white/80 flex items-center gap-1`}>
                   Você: <span className={`${myColor === 'RED' ? 'text-red-400' : myColor === 'GREEN' ? 'text-green-400' : myColor === 'YELLOW' ? 'text-yellow-400' : 'text-blue-400'}`}>{myColor}</span>
+                </div>
+              )}
+              
+              {timeLeft !== null && (
+                <div className="px-3 py-1.5 rounded-full font-bold text-xs uppercase tracking-widest bg-red-500/20 border border-red-500/50 backdrop-blur shadow-[0_0_15px_rgba(239,68,68,0.5)] text-red-500 animate-pulse">
+                  {timeLeft}s
                 </div>
               )}
             </div>
@@ -248,6 +307,50 @@ export function RoomView() {
         )}
       </AnimatePresence>
 
+      {/* Forfeit Confirmation Modal */}
+      <AnimatePresence>
+        {showForfeitModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="glass-panel w-full max-w-sm rounded-[32px] overflow-hidden z-10 flex flex-col border border-white/20 p-8 items-center text-center relative"
+            >
+              <div className="absolute inset-0 bg-gradient-to-tr from-red-500/10 to-orange-500/10 z-0"></div>
+              
+              <div className="w-16 h-16 bg-gradient-to-tr from-red-500 to-orange-600 rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(239,68,68,0.5)] mb-6 z-10 relative">
+                 <LogOut size={28} className="text-white" />
+              </div>
+              
+              <h2 className="text-2xl font-black text-white font-['Anton'] uppercase tracking-widest mb-2 z-10">Desistir da Partida?</h2>
+              <p className="text-white/80 font-bold mb-8 z-10">Se você sair agora, perderá todas as moedas apostadas.</p>
+
+              <div className="flex gap-3 w-full z-10 flex-col sm:flex-row">
+                 <button 
+                   onClick={() => setShowForfeitModal(false)}
+                   className="flex-1 bg-white/10 hover:bg-white/20 text-white font-bold uppercase tracking-widest rounded-2xl py-3 transition-all border border-white/20"
+                 >
+                   Cancelar
+                 </button>
+                 <button 
+                   onClick={handleForfeit}
+                   className="flex-1 bg-red-500/20 hover:bg-red-500/40 text-red-500 hover:text-red-400 font-bold uppercase tracking-widest rounded-2xl py-3 transition-all border border-red-500/50"
+                 >
+                   Sair
+                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* Game Over Modal */}
       <AnimatePresence>
         {gameOverMessage && (
@@ -273,12 +376,20 @@ export function RoomView() {
               <h2 className="text-2xl font-black text-white font-['Anton'] uppercase tracking-widest mb-2 z-10">Partida Encerrada</h2>
               <p className="text-white/80 font-bold mb-8 z-10">{gameOverMessage}</p>
 
-              <button 
-                onClick={leaveRoom}
-                className="w-full bg-white/10 hover:bg-white/20 text-white font-bold uppercase tracking-widest rounded-2xl py-4 transition-all z-10 border border-white/20"
-              >
-                Voltar ao Lobby
-              </button>
+              <div className="w-full flex flex-col gap-3 z-10">
+                <button 
+                  onClick={playAgain}
+                  className="w-full bg-gradient-to-r from-pink-500 to-yellow-500 hover:scale-105 active:scale-95 text-white font-bold uppercase tracking-widest rounded-2xl py-4 transition-all shadow-[0_0_20px_rgba(236,72,153,0.4)]"
+                >
+                  Jogar Novamente
+                </button>
+                <button 
+                  onClick={leaveRoom}
+                  className="w-full bg-white/5 hover:bg-white/10 text-white font-bold uppercase tracking-widest rounded-2xl py-4 transition-all border border-white/10"
+                >
+                  Voltar ao Lobby
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

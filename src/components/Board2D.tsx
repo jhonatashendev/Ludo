@@ -17,6 +17,12 @@ export function Board2D() {
   const movePawn = useGameStore(state => state.movePawn);
   const turn = useGameStore(state => state.turn);
   const diceValue = useGameStore(state => state.diceValue);
+  const room = useGameStore(state => state.room);
+
+  const getPlayerName = (color: string) => {
+    const player = room?.players?.find((p: any) => p.color === color);
+    return player ? player.name.substring(0, 8) : '';
+  };
 
   return (
     <div className="w-full h-full bg-[#1e1b4b] rounded-[32px] shadow-[0_0_40px_rgba(88,28,255,0.4)] p-3 md:p-5 relative transition-transform ring-4 ring-[#1e1b4b]">
@@ -76,6 +82,7 @@ export function Board2D() {
          {/* Top Left Base: RED */}
          <g id="base-red">
            <rect x="0" y="0" width="6" height="6" fill={colors.RED} />
+           <text x="3" y="0.6" fontSize="0.6" fill="white" textAnchor="middle" fontWeight="bold" stroke="black" strokeWidth="0.05">{getPlayerName('RED')}</text>
            <rect x="1" y="1" width="4" height="4" fill={colors.WHITE} rx="0.5" />
            <circle cx="2" cy="2" r="0.6" fill={colors.RED} />
            <circle cx="4" cy="2" r="0.6" fill={colors.RED} />
@@ -86,6 +93,7 @@ export function Board2D() {
          {/* Top Right Base: GREEN */}
          <g id="base-green" transform="translate(9,0)">
            <rect x="0" y="0" width="6" height="6" fill={colors.GREEN} />
+           <text x="3" y="0.6" fontSize="0.6" fill="white" textAnchor="middle" fontWeight="bold" stroke="black" strokeWidth="0.05">{getPlayerName('GREEN')}</text>
            <rect x="1" y="1" width="4" height="4" fill={colors.WHITE} rx="0.5" />
            <circle cx="2" cy="2" r="0.6" fill={colors.GREEN} />
            <circle cx="4" cy="2" r="0.6" fill={colors.GREEN} />
@@ -96,6 +104,7 @@ export function Board2D() {
          {/* Bottom Right Base: YELLOW */}
          <g id="base-yellow" transform="translate(9,9)">
            <rect x="0" y="0" width="6" height="6" fill={colors.YELLOW} />
+           <text x="3" y="0.6" fontSize="0.6" fill="white" textAnchor="middle" fontWeight="bold" stroke="black" strokeWidth="0.05">{getPlayerName('YELLOW')}</text>
            <rect x="1" y="1" width="4" height="4" fill={colors.WHITE} rx="0.5" />
            <circle cx="2" cy="2" r="0.6" fill={colors.YELLOW} />
            <circle cx="4" cy="2" r="0.6" fill={colors.YELLOW} />
@@ -106,6 +115,7 @@ export function Board2D() {
          {/* Bottom Left Base: BLUE */}
          <g id="base-blue" transform="translate(0,9)">
            <rect x="0" y="0" width="6" height="6" fill={colors.BLUE} />
+           <text x="3" y="0.6" fontSize="0.6" fill="white" textAnchor="middle" fontWeight="bold" stroke="black" strokeWidth="0.05">{getPlayerName('BLUE')}</text>
            <rect x="1" y="1" width="4" height="4" fill={colors.WHITE} rx="0.5" />
            <circle cx="2" cy="2" r="0.6" fill={colors.BLUE} />
            <circle cx="4" cy="2" r="0.6" fill={colors.BLUE} />

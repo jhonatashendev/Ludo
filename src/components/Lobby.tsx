@@ -4,7 +4,7 @@ import { Coins, Trophy, Users, ShoppingCart, Headset, ChevronRight, Play, Settin
 import { motion, AnimatePresence } from 'motion/react';
 
 export function Lobby() {
-  const { player, joinRoom, createRoom, getRooms, setView, startOfflineGame } = useGameStore();
+  const { player, joinRoom, createRoom, getRooms, setView, startOfflineGame, activeRoomId, rejoinRoom, forfeitRoom } = useGameStore();
   const [showOfflineModal, setShowOfflineModal] = useState(false);
   const [offlineBet, setOfflineBet] = useState(0);
 
@@ -16,11 +16,16 @@ export function Lobby() {
   const [joinRoomId, setJoinRoomId] = useState('');
   const [joinPassword, setJoinPassword] = useState('');
   const [roomError, setRoomError] = useState('');
+  const [showRejoinModal, setShowRejoinModal] = useState(false);
 
   const handleOpenOnline = () => {
-    setShowOnlineModal(true);
-    setOnlineTab('browse');
-    loadRooms();
+    if (activeRoomId) {
+       setShowRejoinModal(true);
+    } else {
+       setShowOnlineModal(true);
+       setOnlineTab('browse');
+       loadRooms();
+    }
   };
 
   const loadRooms = async () => {
@@ -166,6 +171,33 @@ export function Lobby() {
       </div>
 
       <AnimatePresence>
+        {showRejoinModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="glass p-8 rounded-[32px] max-w-sm w-full text-center space-y-6 z-10"
+            >
+              <div className="text-4xl">⚠️</div>
+              <div>
+                 <h2 className="text-2xl font-black font-['Anton'] uppercase tracking-widest text-yellow-400 mb-2">Partida em Andamento</h2>
+                 <p className="text-sm text-white/50">Você foi desconectado de uma sala ativa. Deseja retornar?</p>
+              </div>
+              <div className="flex flex-col gap-3">
+                 <button onClick={() => { rejoinRoom(); setShowRejoinModal(false); }} className="p-4 rounded-2xl bg-gradient-to-r from-pink-500 to-yellow-500 font-bold uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition">Voltar para a Partida</button>
+                 <button onClick={() => { forfeitRoom(); setShowRejoinModal(false); setShowOnlineModal(true); setOnlineTab('browse'); loadRooms(); }} className="p-4 rounded-2xl bg-white/5 hover:bg-red-500/20 border border-white/10 hover:border-red-500/50 text-white/80 hover:text-red-400 font-bold uppercase tracking-widest transition">Desistir (Virar Robô)</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {showOnlineModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <motion.div 

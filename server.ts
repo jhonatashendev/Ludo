@@ -3,6 +3,7 @@ import { createServer as createViteServer } from "vite";
 import { Server } from "socket.io";
 import http from "http";
 import path from "path";
+import { canPlay, getAbsolutePosition, ABSOLUTE_SAFE_SQUARES } from './src/lib/ludoEngine';
 
 async function startServer() {
   const app = express();
@@ -19,15 +20,224 @@ async function startServer() {
   // Simple in-memory state for prototype
   const rooms = new Map();
   const players = new Map();
+  const usernameToSocket = new Map();
+  
+  function serverNextTurn(room: any) {
+    const activeColors = room.players.map((p: any) => p.color).filter(Boolean);
+    const ORDER = ['RED', 'GREEN', 'YELLOW', 'BLUE'];
+    const colors = ORDER.filter((c) => activeColors.includes(c));
+    if (colors.length === 0) return;
+
+    let currentIdx = colors.indexOf(room.turn);
+    if (currentIdx === -1) currentIdx = 0;
+    
+    let nextTurn = colors[(currentIdx + 1) % colors.length];
+    const finishedPlayers = room.finishedPlayers || [];
+    while (finishedPlayers.includes(nextTurn)) {
+        currentIdx = colors.indexOf(nextTurn);
+        nextTurn = colors[(currentIdx + 1) % colors.length];
+    }
+    
+    room.turn = nextTurn;
+    room.diceValue = null;
+    io.to(room.id).emit("turn_changed", { roomId: room.id, turn: nextTurn });
+  }
+
+  function serverMovePawn(room: any, pawnId: string, diceResult: number) {
+    const pawns = room.pawns;
+    const pawn = pawns.find((p: any) => p.id === pawnId);
+    if (!pawn || !canPlay(pawn, diceResult)) {
+        serverNextTurn(room);
+        setTimeout(() => serverBotLoop(room.id), 1000);
+        return;
+    }
+
+    let newPos = pawn.position === -1 ? 0 : pawn.position + diceResult;
+    let captured = false;
+
+    if (newPos >= 0 && newPos <= 50) {
+        const clone = { ...pawn, position: newPos };
+        const myAbsPos = getAbsolutePosition(clone);
+        if (!ABSOLUTE_SAFE_SQUARES.includes(myAbsPos)) {
+            for (let i = 0; i < pawns.length; i++) {
+                let p2 = pawns[i];
+                if (p2.color !== pawn.color && p2.position >= 0 && p2.position <= 50 && getAbsolutePosition(p2) === myAbsPos) {
+                    p2.position = -1;
+                    captured = true;
+                }
+            }
+        }
+    }
+    pawn.position = newPos;
+
+    // Check game over
+    const activeColors = room.players.map((p: any) => p.color).filter(Boolean);
+    const finishedPlayers = room.finishedPlayers || [];
+    const currentPlayerPawns = pawns.filter((p: any) => p.color === pawn.color);
+    if (currentPlayerPawns.every((p: any) => p.position === 56)) {
+        if (!finishedPlayers.includes(pawn.color)) finishedPlayers.push(pawn.color);
+    }
+    room.finishedPlayers = finishedPlayers;
+
+    io.to(room.id).emit("pawn_moved", { roomId: room.id, pawnId, diceValue: diceResult });
+
+    const finishThreshold = Math.min(2, activeColors.length - 1);
+
+    if (finishedPlayers.length >= finishThreshold && activeColors.length > 1) {
+        const remaining = activeColors.filter((c: string) => !finishedPlayers.includes(c));
+        remaining.sort((a: string, b: string) => {
+            const pawnsA = pawns.filter((p: any) => p.color === a).reduce((acc: number, p: any) => acc + (p.position === -1 ? -1 : p.position), 0);
+            const pawnsB = pawns.filter((p: any) => p.color === b).reduce((acc: number, p: any) => acc + (p.position === -1 ? -1 : p.position), 0);
+            return pawnsB - pawnsA;
+        });
+        room.finishedPlayers = [...finishedPlayers, ...remaining];
+        room.gameState = 'finished';
+        room.botLoopRunning = false;
+        io.to(room.id).emit("room_update", room);
+        return;
+    }
+
+    if (diceResult === 6 || captured) {
+        room.diceValue = null;
+        setTimeout(() => serverBotLoop(room.id), 1000);
+    } else {
+        serverNextTurn(room);
+        setTimeout(() => serverBotLoop(room.id), 1000);
+    }
+  }
+
+  function serverBotLoop(roomId: string) {
+    const room = rooms.get(roomId);
+    if (!room || room.gameState !== 'playing') {
+       if (room) room.botLoopRunning = false;
+       return;
+    }
+
+    // Is there any connected human?
+    const humanCount = room.players.filter((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && !p.isBot).length;
+    if (humanCount > 0) {
+       room.botLoopRunning = false;
+       return; // If some human is here, they will manage
+    }
+
+    const botColor = room.turn;
+    const isBot = room.players.find((p: any) => p.color === botColor && p.isBot);
+    if (!isBot) {
+        serverNextTurn(room);
+        setTimeout(() => serverBotLoop(roomId), 1000);
+        return;
+    }
+
+    // Roll
+    const diceResult = Math.floor(Math.random() * 6) + 1;
+    room.diceValue = diceResult;
+    io.to(roomId).emit("dice_rolled", { roomId, result: diceResult });
+    
+    setTimeout(() => {
+        const room = rooms.get(roomId);
+        if(!room || room.gameState !== 'playing') return;
+        if(room.players.filter((p: any) => !p.isDisconnected && !p.id.startsWith('bot_')).length > 0) return;
+
+        const pawns = room.pawns || [];
+        const botPawns = pawns.filter((p: any) => p.color === botColor);
+        const validMoves = botPawns.filter((p: any) => canPlay(p, diceResult));
+
+        if (validMoves.length > 0) {
+            const captureMoves = validMoves.filter((p: any) => {
+                let newPos = p.position === -1 ? 0 : p.position + diceResult;
+                if (newPos >= 0 && newPos <= 50) {
+                    const clone = { ...p, position: newPos };
+                    const myAbsPos = getAbsolutePosition(clone);
+                    if (!ABSOLUTE_SAFE_SQUARES.includes(myAbsPos)) {
+                        return pawns.some((p2: any) => p2.color !== botColor && p2.position >= 0 && p2.position <= 50 && getAbsolutePosition(p2) === myAbsPos);
+                    }
+                }
+                return false;
+            });
+            const spawningMoves = validMoves.filter((p: any) => p.position === -1);
+            const finishLineMoves = validMoves.filter((p: any) => p.position !== -1 && p.position + diceResult > 50);
+            const fleeingMoves = validMoves.filter((p: any) => {
+                if (p.position === -1 || p.position > 50) return false;
+                const myAbs = getAbsolutePosition(p);
+                if (ABSOLUTE_SAFE_SQUARES.includes(myAbs)) return false;
+                return pawns.some((p2: any) => {
+                    if (p2.color === botColor || p2.position < 0 || p2.position > 50) return false;
+                    const enemyAbs = getAbsolutePosition(p2);
+                    const diff = (myAbs - enemyAbs + 52) % 52;
+                    return diff > 0 && diff <= 6;
+                });
+            });
+            const mostAdvancedMoves = [...validMoves].sort((a: any, b: any) => b.position - a.position);
+
+            const pawnToMove = captureMoves[0] || spawningMoves[0] || finishLineMoves[0] || fleeingMoves[0] || mostAdvancedMoves[0];
+
+            serverMovePawn(room, pawnToMove.id, diceResult);
+        } else {
+            if (diceResult === 6) {
+                room.diceValue = null;
+                setTimeout(() => serverBotLoop(roomId), 1000);
+            } else {
+                serverNextTurn(room);
+                setTimeout(() => serverBotLoop(roomId), 1000);
+            }
+        }
+    }, 800);
+  }
 
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
 
-    // Give default coins
-    players.set(socket.id, { id: socket.id, username: `Player_${Math.floor(Math.random() * 1000)}`, coins: 10450 });
+    // Give default initial name, but it will be updated by client
+    const initialName = `Player_${Math.floor(Math.random() * 100000)}`;
+    players.set(socket.id, { id: socket.id, username: initialName, coins: 10450 });
+    usernameToSocket.set(initialName, socket.id);
     
     // Send info immediately so the lobby can render
     socket.emit("player_info", players.get(socket.id));
+
+    socket.on("update_profile", (data, callback) => {
+      const existingSocketId = usernameToSocket.get(data.username);
+      if (existingSocketId && existingSocketId !== socket.id) {
+        // Kick the OLD socket out
+        io.to(existingSocketId).emit("force_disconnect", { reason: "Você acessou de outro local." });
+        const oldSocket = io.sockets.sockets.get(existingSocketId);
+        if (oldSocket) {
+           oldSocket.disconnect(true);
+        }
+      }
+      
+      const oldPlayer = players.get(socket.id);
+      if (oldPlayer && oldPlayer.username !== data.username) {
+        usernameToSocket.delete(oldPlayer.username);
+        // Rename in active rooms if any
+        rooms.forEach((room) => {
+          const p = room.players.find((rp: any) => rp.id === socket.id);
+          if (p) {
+             p.name = data.username;
+             io.to(room.id).emit("room_update", room);
+          }
+        });
+      }
+
+      usernameToSocket.set(data.username, socket.id);
+      
+      if (oldPlayer) {
+        oldPlayer.username = data.username;
+        if (data.coins !== undefined) oldPlayer.coins = data.coins;
+      }
+
+      // Check if they have a disconnected spot in a playing room
+      let activeRoomId = null;
+      rooms.forEach((room, roomId) => {
+        const spot = room.players.find((rp: any) => rp.name === data.username && rp.isDisconnected);
+        if (spot) {
+          activeRoomId = roomId;
+        }
+      });
+
+      if (callback) callback({ success: true, activeRoomId });
+      socket.emit("player_info", players.get(socket.id));
+    });
 
     socket.on("get_rooms", (callback) => {
       const availableRooms = Array.from(rooms.values())
@@ -165,12 +375,39 @@ async function startServer() {
       socket.to(data.roomId).emit("dice_rolled", data);
     });
 
+    socket.on("bot_roll_dice", (data) => {
+      socket.to(data.roomId).emit("dice_rolled", data);
+    });
+
     socket.on("move_pawn", (data) => {
       socket.to(data.roomId).emit("pawn_moved", data);
     });
     
     socket.on("next_turn", (data) => {
       socket.to(data.roomId).emit("turn_changed", data);
+    });
+
+    socket.on("sync_state", (data) => {
+      const room = rooms.get(data.roomId);
+      if (room) {
+         room.pawns = data.pawns;
+         room.turn = data.turn;
+         room.diceValue = data.diceValue;
+      }
+    });
+
+    socket.on("play_again", (roomId) => {
+      const room = rooms.get(roomId);
+      if (room && room.gameState === 'finished') {
+         room.gameState = 'waiting';
+         room.finishedPlayers = [];
+         room.botLoopRunning = false;
+         
+         // Only keep non-forfeited humans and bots
+         room.players = room.players.filter((p: any) => !p.isForfeited);
+         
+         io.to(roomId).emit("room_update", room);
+      }
     });
 
     socket.on("voice_signal", (data) => {
@@ -200,17 +437,113 @@ async function startServer() {
     socket.on("webrtc_ice_candidate", (data) => {
       socket.to(data.roomId).emit("webrtc_ice_candidate", { sender: socket.id, candidate: data.candidate });
     });
+    
+    socket.on("leave_room", (roomId) => {
+      const room = rooms.get(roomId);
+      if (room) {
+        const playerIndex = room.players.findIndex((p: any) => p.id === socket.id);
+        if (playerIndex !== -1) {
+          if (room.gameState === 'playing') {
+             room.players[playerIndex].isDisconnected = true;
+             room.players[playerIndex].isBot = true; 
+             const humanCount = room.players.filter((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && !p.isBot).length;
+             if (humanCount === 0 && !room.botLoopRunning) {
+                 room.botLoopRunning = true;
+                 serverBotLoop(roomId);
+             }
+          } else {
+             room.players.splice(playerIndex, 1);
+             if (room.players.length === 0) {
+                rooms.delete(roomId);
+             }
+          }
+          io.to(roomId).emit("room_update", room);
+          io.emit("rooms_list_update");
+        }
+      }
+      socket.leave(roomId);
+    });
 
     socket.on("disconnect", () => {
+      const playerInfo = players.get(socket.id);
+      if (playerInfo) {
+        usernameToSocket.delete(playerInfo.username);
+      }
       players.delete(socket.id);
+
       // Clean up rooms
       rooms.forEach((room, roomId) => {
-        if (room.players.find((p: any) => p.id === socket.id)) {
-          room.players = room.players.filter((p: any) => p.id !== socket.id);
+        const playerIndex = room.players.findIndex((p: any) => p.id === socket.id);
+        if (playerIndex !== -1) {
+          if (room.gameState === 'playing') {
+             room.players[playerIndex].isDisconnected = true;
+             room.players[playerIndex].isBot = true; 
+             const humanCount = room.players.filter((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && !p.isBot).length;
+             if (humanCount === 0 && !room.botLoopRunning) {
+                 room.botLoopRunning = true;
+                 serverBotLoop(roomId);
+             }
+          } else {
+             room.players = room.players.filter((p: any) => p.id !== socket.id);
+             if (room.players.length === 0) {
+                rooms.delete(roomId);
+             }
+          }
           io.to(roomId).emit("room_update", room);
         }
       });
       console.log("Client disconnected:", socket.id);
+    });
+
+    socket.on("rejoin_room", (roomId, callback) => {
+       const room = rooms.get(roomId);
+       if (!room) {
+          if (callback) callback({ success: false, error: 'Sala não encontrada' });
+          return;
+       }
+       const playerInfo = players.get(socket.id);
+       const spotIndex = room.players.findIndex((p: any) => p.name === playerInfo.username && p.isDisconnected);
+       
+       if (spotIndex !== -1) {
+          // Reclaim spot
+          room.players[spotIndex].id = socket.id;
+          room.players[spotIndex].isBot = false;
+          room.players[spotIndex].isDisconnected = false;
+          socket.join(roomId);
+          io.to(roomId).emit("room_update", room);
+          if (callback) callback({ success: true, room: { ...room, password: null } });
+       } else {
+          if (callback) callback({ success: false, error: 'Vaga não encontrada' });
+       }
+    });
+
+    socket.on("forfeit_room", (roomId, callback) => {
+       const room = rooms.get(roomId);
+       if (!room) return;
+       const playerInfo = players.get(socket.id);
+       const spotIndex = room.players.findIndex((p: any) => p.name === playerInfo.username);
+       if (spotIndex !== -1) {
+          room.players[spotIndex].name = `Robô (${playerInfo.username})`;
+          room.players[spotIndex].isDisconnected = false; // it's completely a bot now
+          room.players[spotIndex].isBot = true;
+          room.players[spotIndex].isForfeited = true;
+          io.to(roomId).emit("room_update", room);
+          
+          const humanCount = room.players.filter((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && !p.isBot).length;
+          // If no other humans are connected, and all disconnected humans in fact forfeited...
+          const potentialReconnects = room.players.filter((p: any) => (!p.id.startsWith('bot_') && p.isDisconnected && !p.isForfeited)).length;
+          
+          if (humanCount === 0 && potentialReconnects === 0 && room.gameState === 'playing') {
+             room.botLoopRunning = false;
+             rooms.delete(roomId);
+             io.emit("rooms_list_update");
+          } else if (humanCount === 0 && room.gameState === 'playing' && !room.botLoopRunning) {
+             room.botLoopRunning = true;
+             serverBotLoop(roomId);
+          }
+       }
+       socket.leave(roomId);
+       if (callback) callback({ success: true });
     });
   });
 
