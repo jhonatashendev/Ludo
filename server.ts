@@ -406,11 +406,13 @@ async function startServer() {
     socket.on("sync_state", (data) => {
       const room = rooms.get(data.roomId);
       if (room) {
-         room.pawns = data.pawns;
-         room.turn = data.turn;
-         room.diceValue = data.diceValue;
+         if (data.pawns !== undefined) room.pawns = data.pawns;
+         if (data.turn !== undefined) room.turn = data.turn;
+         if (data.diceValue !== undefined) room.diceValue = data.diceValue;
+         if (data.diceChoices !== undefined) room.diceChoices = data.diceChoices;
          if (data.traps !== undefined) room.traps = data.traps;
          if (data.powerEffects !== undefined) room.powerEffects = data.powerEffects;
+         socket.to(data.roomId).emit("sync_state", data);
       }
     });
 

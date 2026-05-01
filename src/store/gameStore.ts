@@ -51,8 +51,10 @@ interface GameState {
   pawns: Pawn[];
   turn: PlayerColor;
   diceValue: number | null;
+  originalDiceValue: number | null;
   diceChoices: [number, number] | null;
   isRolling: boolean;
+  powerNotification: string | null;
   activeRoomId: string | null;
   betAmount: number;
   finishedPlayers: PlayerColor[];
@@ -106,8 +108,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   pawns: [],
   turn: 'RED',
   diceValue: null,
+  originalDiceValue: null,
   diceChoices: null,
   isRolling: false,
+  powerNotification: null,
   activeRoomId: null,
   betAmount: 0,
   finishedPlayers: [],
@@ -196,7 +200,17 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
     socket.on('receive_message', (msg: Message) => {
        if (!get().isOffline) {
-          set((state) => ({ messages: [...state.messages, msg] }));
+          set((state) => {
+             const newMessages = [...state.messages, msg];
+             if (newMessages.length > 100) newMessages.shift(); // Keep max 100 messages
+             return { messages: newMessages };
+          });
+          if (msg.sender === 'Poderes') {
+             set({ powerNotification: msg.text });
+             setTimeout(() => {
+                if (get().powerNotification === msg.text) set({ powerNotification: null });
+             }, 5000);
+          }
        }
     });
     
@@ -243,9 +257,25 @@ export const useGameStore = create<GameState>((set, get) => ({
        }
     });
 
+    socket.on('sync_state', (data: any) => {
+       if (!get().isOffline) {
+          const { room } = get();
+          if (room) {
+             const newRoom = { ...room };
+             if (data.pawns !== undefined) set({ pawns: data.pawns });
+             if (data.turn !== undefined) set({ turn: data.turn });
+             if (data.diceValue !== undefined) set({ diceValue: data.diceValue });
+             if (data.diceChoices !== undefined) set({ diceChoices: data.diceChoices });
+             if (data.traps !== undefined) newRoom.traps = data.traps;
+             if (data.powerEffects !== undefined) newRoom.powerEffects = data.powerEffects;
+             set({ room: newRoom });
+          }
+       }
+    });
+
     socket.on('turn_changed', (data: any) => {
        if (!get().isOffline) {
-          set({ turn: data.turn, diceValue: null, isRolling: false });
+          set({ turn: data.turn, diceValue: null, originalDiceValue: null, diceChoices: null, isRolling: false });
           
           const roomPlayers = get().room?.players || [];
           const firstHuman = roomPlayers.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
@@ -481,19 +511,31 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   executeDiceResult: (result: number, isBot: boolean) => {
       const { isOffline, socket, room, turn } = get();
-      set({ diceValue: result, isRolling: false, diceChoices: null });
+      set({ diceValue: result, originalDiceValue: result, isRolling: false, diceChoices: null });
       
       if (!isOffline && socket && room) {
         socket.emit('roll_dice', { roomId: room.id, result });
+        socket.emit('sync_state', { roomId: room.id, diceChoices: null });
       }
 
       // Decrement/handle power effects before resolving moves
       const effects = room?.powerEffects?.[turn];
+      const hasCurse = !!(effects?.curse && effects.curse > 0);
+      const hasTurbo = !!(effects?.turbo && effects.turbo > 0);
+      const hasDoubleRoll = !!(effects?.doubleRoll && effects.doubleRoll > 0);
+      const hasShield = !!(effects?.shield && effects.shield > 0);
+      const hasDiceBlock = !!(effects?.diceBlock && effects.diceBlock > 0);
+
       let didTriggerPower = false;
+      let moveResult = result;
+      if (hasCurse) moveResult = 1;
+      if (hasTurbo) moveResult = result * 2;
 
       if (room?.gameMode === 'powers' && result === 1) {
-         if (effects?.diceBlock && effects.diceBlock > 0) {
+         if (hasDiceBlock) {
             // "se esse jogador tirar 1 ele não ganha poder"
+         } else if (hasCurse) {
+            // "jogador amaldiçoado não ganha poderes se tirar 1"
          } else {
             get().triggerPower(turn);
             didTriggerPower = true;
@@ -503,33 +545,18 @@ export const useGameStore = create<GameState>((set, get) => ({
       // Consume roll-based effects
       if (effects) {
          let newEffects = { ...room!.powerEffects };
-         if (newEffects[turn].diceBlock && newEffects[turn].diceBlock! > 0) {
-             newEffects[turn].diceBlock! -= 1;
-         }
-         if (newEffects[turn].curse && newEffects[turn].curse! > 0) {
-             newEffects[turn].curse! -= 1;
-             // Curse forces result to 1 (or 1 move). But wait, do we override result? 
-             // "escolhe 1 jogador para anda sempre 1 casa por 1 rodadas" -> they already rolled, let's treat curse as overriding their roll to 1! 
-             // Wait, if it forces 1, they would trigger powers again? No, curse shouldn't chain powers usually... but maybe it does. Let's just override result.
-         }
-         if (newEffects[turn].turbo && newEffects[turn].turbo! > 0) {
-             newEffects[turn].turbo! -= 1;
-         }
-         if (newEffects[turn].shield && newEffects[turn].shield! > 0) {
-             newEffects[turn].shield! -= 1;
-         }
-         if (newEffects[turn].doubleRoll && newEffects[turn].doubleRoll! > 0) {
-             newEffects[turn].doubleRoll! -= 1;
-         }
+         newEffects[turn] = { ...newEffects[turn] };
+         
+         if (newEffects[turn].diceBlock && newEffects[turn].diceBlock! > 0) newEffects[turn].diceBlock! -= 1;
+         if (newEffects[turn].curse && newEffects[turn].curse! > 0) newEffects[turn].curse! -= 1;
+         if (newEffects[turn].turbo && newEffects[turn].turbo! > 0) newEffects[turn].turbo! -= 1;
+         if (newEffects[turn].shield && newEffects[turn].shield! > 0) newEffects[turn].shield! -= 1;
+         if (newEffects[turn].doubleRoll && newEffects[turn].doubleRoll! > 0) newEffects[turn].doubleRoll! -= 1;
          
          if (room && socket) socket.emit('sync_state', { roomId: room.id, powerEffects: newEffects });
          set({ room: { ...room!, powerEffects: newEffects } });
       }
 
-      let moveResult = result;
-      if (effects?.curse && effects.curse > 0) moveResult = 1;
-      if (effects?.turbo && effects.turbo > 0) moveResult = result * 2;
-      
       set({ diceValue: moveResult });
       get().syncState();
 
@@ -538,7 +565,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       const validMoves = myPawns.filter(p => canPlay(p, moveResult));
       
       if (validMoves.length === 0) {
-        if (moveResult === 6) {
+        if (result === 6) {
           setTimeout(() => {
              set({ diceValue: null });
              if (get().shouldManageTurn()) {
@@ -595,8 +622,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   rollDice: () => {
-    const { isRolling, diceValue, turn, myColor, room } = get();
-    if (isRolling || diceValue !== null || turn !== myColor) return;
+    const { isRolling, diceValue, turn, myColor, room, diceChoices } = get();
+    if (isRolling || diceValue !== null || diceChoices !== null || turn !== myColor) return;
     
     if (get().soundEnabled) {
       import('../lib/sounds').then(({ playSound }) => playSound('roll'));
@@ -609,13 +636,20 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (room?.gameMode === 'powers' && room?.powerEffects?.[turn]?.diceBlock && room.powerEffects[turn].diceBlock! > 0) {
          maxRoll = 3;
       }
-      const result = Math.floor(Math.random() * maxRoll) + 1;
+      let result = Math.floor(Math.random() * maxRoll) + 1;
+      
+      if (room?.gameMode === 'powers' && room?.powerEffects?.[turn]?.curse && room.powerEffects[turn].curse! > 0) {
+         result = 1;
+      }
       
       // If doubleRoll is active and room is powers
       const doubleRollData = room?.powerEffects?.[turn]?.doubleRoll;
       if (room && room.gameMode === 'powers' && doubleRollData && doubleRollData > 0) {
-         const result2 = Math.floor(Math.random() * maxRoll) + 1;
+         const result2 = room.powerEffects[turn].curse! > 0 ? 1 : Math.floor(Math.random() * maxRoll) + 1;
          set({ diceChoices: [result, result2], isRolling: false });
+         if (!get().isOffline && get().socket && room) {
+             get().socket!.emit('sync_state', { roomId: room.id, diceChoices: [result, result2] });
+         }
          return;
       }
       
@@ -663,7 +697,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     }
 
     let newPawns = [...pawns];
-    let newPos = pawn.position === -1 ? 0 : pawn.position + diceResult;
+    let newPos;
+    if (pawn.position === -1) {
+       // Exiting base consumes 6 distance. 
+       // If they rolled 6 natively, diceResult is 6, newPos is 0.
+       // If they rolled 3 with turbo, diceResult is 6, newPos is 0. 
+       // If they rolled 6 with turbo, diceResult is 12, so remaining is 6.
+       newPos = diceResult > 6 ? diceResult - 6 : 0;
+    } else {
+       newPos = pawn.position + diceResult;
+    }
     
     // Check Traps first so newPos is final
     if (newPos >= 0 && newPos <= 50) {
@@ -673,11 +716,15 @@ export const useGameStore = create<GameState>((set, get) => ({
            const triggeredTrapIndex = room.traps.indexOf(myAbsPos);
            const spacesBack = Math.floor(Math.random() * 10) + 1;
            newPos = Math.max(0, Math.min(newPos - spacesBack, 50)); // Don't allow it to go negative. Start is 0 (first square outside base)
+           const msg = `Armadilha! A peça de ${turn} caiu numa armadilha e voltou ${Math.min(spacesBack, pawn.position + diceResult - newPos)} casas.`;
            if (!isOffline && socket) {
-              const msg = `Armadilha! A peça de ${turn} caiu numa armadilha e voltou ${Math.min(spacesBack, pawn.position + diceResult - newPos)} casas.`;
               socket.emit('send_message', { roomId: room.id, message: msg, sender: 'Poderes' });
-              get().addMessage({ id: Date.now().toString(), sender: 'Poderes', text: msg, timestamp: Date.now() });
            }
+           get().addMessage({ id: Date.now().toString(), sender: 'Poderes', text: msg, timestamp: Date.now() });
+           set({ powerNotification: msg });
+           setTimeout(() => {
+              if (get().powerNotification === msg) set({ powerNotification: null });
+           }, 5000);
            // Generating new trap
            let newTrapPos = Math.floor(Math.random() * 52);
            while (ABSOLUTE_SAFE_SQUARES.includes(newTrapPos) || room.traps.includes(newTrapPos)) {
@@ -780,8 +827,9 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (newGameOverMessage) return; // Stop playing if game over
 
     // If rolled 6 or captured, extra turn, else nextTurn
-    if ((diceResult === 6 || captured) && !hasFinished) {
-       set({ diceValue: null, isRolling: false });
+    const { originalDiceValue } = get();
+    if ((originalDiceValue === 6 || captured) && !hasFinished) {
+       set({ diceValue: null, originalDiceValue: null, isRolling: false });
        get().syncState();
        if (get().shouldManageTurn()) {
          const isBot = (!isOffline && room?.players.find((p: any) => p.color === turn && p.isBot)) || (isOffline && turn !== get().myColor);
@@ -797,8 +845,21 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   movePawn: (pawnId: string) => {
-    const { diceValue, isOffline, socket, room } = get();
+    const { diceValue, isOffline, socket, room, pawns, turn, myColor } = get();
     if (!diceValue) return;
+
+    const pawn = pawns.find(p => p.id === pawnId);
+    if (!pawn || pawn.color !== turn) return; // Basic validation
+    
+    // Security check: Only allow if it's our turn, or if it's a bot's turn and we are the host
+    if (!isOffline) {
+       const isBotTurn = room?.players.find((p: any) => p.color === turn && p.isBot);
+       const firstHuman = room?.players.find((p: any) => !p.isDisconnected && !p.id.startsWith('bot_') && p.id);
+       const isHost = firstHuman?.id === socket?.id;
+       if (turn !== myColor && !(isBotTurn && isHost)) {
+          return;
+       }
+    }
     
     if (!isOffline && socket && room) {
        socket.emit('move_pawn', { roomId: room.id, pawnId, diceValue });
@@ -833,7 +894,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       nextTurn = colors[(currentIdx + 1) % colors.length];
     }
     
-    set({ turn: nextTurn, diceValue: null, isRolling: false });
+    set({ turn: nextTurn, diceValue: null, originalDiceValue: null, isRolling: false });
     get().syncState();
     
     if (!isOffline && socket && room) {
@@ -859,19 +920,29 @@ export const useGameStore = create<GameState>((set, get) => ({
     const { room, socket, isOffline, pawns } = get();
     if (!room) return;
 
-    const powers = ['EMPURRAO', 'BLOQUEIO_DE_DADO', 'ESCUDO', 'MODO_TURBO', 'MALDICAO', 'ROLAGEM_DUPLA'];
-    const randomPower = powers[Math.floor(Math.random() * powers.length)];
+    // Check if the current player has any pawns outside the base
+    const hasPawnOut = pawns.some(p => p.color === color && p.position >= 0 && p.position < 56);
+
+    const activeColors = room.players.map((p: any) => p.color).filter(Boolean);
+    
+    // Valid enemies are those who have at least one pawn out of the base
+    const validEnemies = activeColors.filter(c => c !== color && pawns.some(p => p.color === c && p.position >= 0 && p.position < 56));
+
+    let availablePowers = ['ESCUDO', 'MODO_TURBO', 'ROLAGEM_DUPLA'];
+    if (hasPawnOut && validEnemies.length > 0) {
+        availablePowers.push('EMPURRAO', 'BLOQUEIO_DE_DADO', 'MALDICAO');
+    }
+
+    const randomPower = availablePowers[Math.floor(Math.random() * availablePowers.length)];
 
     let newEffects = { ...room.powerEffects };
     if (!newEffects[color]) newEffects[color] = {};
     
     let messageText = '';
-    const activeColors = room.players.map((p: any) => p.color).filter(Boolean);
-    const enemies = activeColors.filter(c => c !== color);
-    const randomEnemy = enemies[Math.floor(Math.random() * enemies.length)];
+    const randomEnemy = validEnemies.length > 0 ? validEnemies[Math.floor(Math.random() * validEnemies.length)] : null;
 
     if (randomPower === 'EMPURRAO') {
-        const enemyPawns = pawns.filter(p => enemies.includes(p.color) && p.position > 0 && p.position <= 50);
+        const enemyPawns = pawns.filter(p => validEnemies.includes(p.color) && p.position > 0 && p.position <= 50);
         if (enemyPawns.length > 0) {
             const target = enemyPawns[Math.floor(Math.random() * enemyPawns.length)];
             const spacesBack = Math.floor(Math.random() * 5) + 1;
@@ -890,7 +961,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         } else {
             messageText = `Empurrão! Mas não havia peças inimigas no tabuleiro.`;
         }
-    } else if (randomPower === 'BLOQUEIO_DE_DADO') {
+    } else if (randomPower === 'BLOQUEIO_DE_DADO' && randomEnemy) {
         if (!newEffects[randomEnemy]) newEffects[randomEnemy] = {};
         newEffects[randomEnemy].diceBlock = 1;
         messageText = `Bloqueio de Dado! O jogador ${randomEnemy} só poderá tirar até 3 na próxima rodada.`;
@@ -900,10 +971,10 @@ export const useGameStore = create<GameState>((set, get) => ({
     } else if (randomPower === 'MODO_TURBO') {
         newEffects[color].turbo = 1;
         messageText = `Modo Turbo! O jogador ${color} andará o dobro no seu próximo turno.`;
-    } else if (randomPower === 'MALDICAO') {
+    } else if (randomPower === 'MALDICAO' && randomEnemy) {
         if (!newEffects[randomEnemy]) newEffects[randomEnemy] = {};
         newEffects[randomEnemy].curse = 1;
-        messageText = `Maldição! O jogador ${randomEnemy} irá parar e andar apenas 1 casa.`;
+        messageText = `Maldição! O jogador ${randomEnemy} irá parar e andar apenas 1 casa na próxima vez.`;
     } else if (randomPower === 'ROLAGEM_DUPLA') {
         newEffects[color].doubleRoll = 1;
         messageText = `Rolagem Dupla! O jogador ${color} vai rolar dois dados no próximo turno.`;
@@ -913,8 +984,15 @@ export const useGameStore = create<GameState>((set, get) => ({
       socket.emit('send_message', { roomId: room.id, message: messageText, sender: 'Poderes' });
       socket.emit('sync_state', { roomId: room.id, powerEffects: newEffects });
     }
-    set({ room: { ...room, powerEffects: newEffects } });
+    set({ room: { ...room, powerEffects: newEffects }, powerNotification: messageText });
     get().addMessage({ id: Date.now().toString(), sender: 'Poderes', text: messageText, timestamp: Date.now() });
+    
+    // Clear notification after 5 seconds
+    setTimeout(() => {
+       if (get().powerNotification === messageText) {
+          set({ powerNotification: null });
+       }
+    }, 5000);
   },
 
   playBotTurn: (botColor: PlayerColor) => {
@@ -933,9 +1011,13 @@ export const useGameStore = create<GameState>((set, get) => ({
 
         let result = Math.floor(Math.random() * maxRoll) + 1;
         
+        if (room?.gameMode === 'powers' && room?.powerEffects?.[botColor]?.curse && room.powerEffects[botColor].curse! > 0) {
+           result = 1;
+        }
+
         const doubleRollData = room?.powerEffects?.[botColor]?.doubleRoll;
         if (room && room.gameMode === 'powers' && doubleRollData && doubleRollData > 0) {
-           const result2 = Math.floor(Math.random() * maxRoll) + 1;
+           const result2 = room.powerEffects[botColor].curse! > 0 ? 1 : Math.floor(Math.random() * maxRoll) + 1;
            result = Math.max(result, result2); 
         }
         
@@ -947,7 +1029,11 @@ export const useGameStore = create<GameState>((set, get) => ({
   setView: (view) => set({ view }),
   setVoiceEnabled: (enabled) => set({ voiceEnabled: enabled }),
   setSoundEnabled: (enabled) => set({ soundEnabled: enabled }),
-  addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
+  addMessage: (msg) => set((state) => {
+     const newMessages = [...state.messages, msg];
+     if (newMessages.length > 100) newMessages.shift();
+     return { messages: newMessages };
+  }),
   updateRoom: (room) => set({ room }),
   setPlayer: (player) => set({ player }),
 }));

@@ -12,6 +12,7 @@ export function RoomView() {
   const startGameOnline = useGameStore(state => state.startGameOnline);
   const playAgain = useGameStore(state => state.playAgain);
   const selectDiceChoice = useGameStore(state => state.selectDiceChoice);
+  const powerNotification = useGameStore(state => state.powerNotification);
   const diceValue = useGameStore(state => state.diceValue);
   const diceChoices = useGameStore(state => state.diceChoices);
   const isRolling = useGameStore(state => state.isRolling);
@@ -53,13 +54,17 @@ export function RoomView() {
     } else {
       setTimeLeft(null);
     }
-  }, [turn, diceValue, myColor, isOffline, room?.gameState, gameOverMessage]);
+  }, [turn, diceValue, diceChoices, myColor, isOffline, room?.gameState, gameOverMessage]);
 
   useEffect(() => {
     if (timeLeft === null) return;
     if (timeLeft <= 0) {
       if (diceValue === null) {
-        rollDice();
+        if (diceChoices) {
+           selectDiceChoice(Math.max(diceChoices[0], diceChoices[1]));
+        } else {
+           rollDice();
+        }
       } else {
         playBotTurn(myColor);
       }
@@ -70,7 +75,7 @@ export function RoomView() {
       setTimeLeft(prev => prev !== null ? prev - 1 : null);
     }, 1000);
     return () => clearTimeout(t);
-  }, [timeLeft, diceValue, rollDice, playBotTurn, myColor]);
+  }, [timeLeft, diceValue, diceChoices, rollDice, playBotTurn, myColor, selectDiceChoice]);
 
   useEffect(() => {
     if (isChatOpen) {
@@ -85,6 +90,22 @@ export function RoomView() {
   return (
     <div className="fixed inset-0 bg-[#0c0a1f] text-white overflow-hidden">
       {/* Top Header */}
+      <AnimatePresence>
+        {powerNotification && (
+          <motion.div 
+             initial={{ y: -100, opacity: 0 }}
+             animate={{ y: 0, opacity: 1 }}
+             exit={{ y: -50, opacity: 0 }}
+             className="absolute top-20 left-1/2 -translate-x-1/2 z-50 pointer-events-none w-full max-w-md px-4"
+          >
+             <div className="bg-gradient-to-r from-purple-600/90 to-pink-600/90 backdrop-blur-md text-white px-6 py-4 rounded-2xl shadow-[0_10px_40px_rgba(219,39,119,0.5)] border border-white/20 text-center font-bold">
+                <span className="text-xl inline-block mr-2">⚡</span>
+                {powerNotification}
+             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="absolute top-0 left-0 right-0 p-4 flex justify-between items-start z-10 pointer-events-none">
         <div className="flex flex-col gap-2 pointer-events-auto">
           <div className="flex gap-4">

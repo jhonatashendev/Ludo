@@ -39,15 +39,16 @@ export const HOME_RUN_COORDS = {
   BLUE: [[7,13], [7,12], [7,11], [7,10], [7,9], [7,8]],
 };
 
+const BASES_COORDS: Record<PlayerColor, [number, number][]> = {
+  RED: [[2,2], [4,2], [2,4], [4,4]],
+  GREEN: [[11,2], [13,2], [11,4], [13,4]],
+  YELLOW: [[11,11], [13,11], [11,13], [13,13]],
+  BLUE: [[2,11], [4,11], [2,13], [4,13]],
+};
+
 export function getPawnCoords(pawn: Pawn): [number, number] {
   if (pawn.position === -1) {
-    const bases: Record<PlayerColor, [number, number][]> = {
-      RED: [[2,2], [4,2], [2,4], [4,4]],
-      GREEN: [[11,2], [13,2], [11,4], [13,4]],
-      YELLOW: [[11,11], [13,11], [11,13], [13,13]],
-      BLUE: [[2,11], [4,11], [2,13], [4,13]],
-    };
-    return bases[pawn.color][pawn.baseIndex];
+    return BASES_COORDS[pawn.color][pawn.baseIndex];
   }
 
   if (pawn.position >= 0 && pawn.position <= 50) {
@@ -81,7 +82,7 @@ export function getAbsolutePosition(pawn: Pawn): number {
 }
 
 export function canPlay(pawn: Pawn, dice: number): boolean {
-  if (pawn.position === -1) return dice === 6;
+  if (pawn.position === -1) return dice === 6 || dice === 12;
   if (pawn.position + dice <= 56) return true;
   return false;
 }
